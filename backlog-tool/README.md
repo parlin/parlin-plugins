@@ -47,11 +47,22 @@ backlog my-features  # or specify a custom directory
 | x | Edit research file |
 | n | New feature |
 | d | Delete feature (with confirmation) |
+| c | Toggle Claude pane for current feature + tab |
 | s | Save all changes |
 | r | Reload from disk |
 | Ctrl+R | Restart process |
 | [ / ] | Resize pane ratio |
 | q | Quit |
+
+### Claude pane
+
+Press `c` on a feature row to launch an interactive Claude Code session briefed for that feature and the currently active tab:
+
+- **Description tab** — conversational refinement; Claude won't write to the spec without confirmation.
+- **Plan tab** — Claude drafts or refines `FXX-…-plan.md`.
+- **Research tab** — Claude investigates and writes findings to `FXX-…-research.md`.
+
+Inside `tmux`, the pane opens as a vertical split next to the TUI. Outside `tmux`, the TUI suspends and Claude takes the full terminal until you exit. Press `c` again to close the pane; switching tabs while a pane is open will prompt to close and respawn with the new brief.
 
 ## File Structure
 

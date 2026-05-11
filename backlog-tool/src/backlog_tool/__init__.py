@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cannon Defence 360 — Backlog Manager
+Backlog Manager
 Terminal TUI for managing feature backlog files.
 
 Usage: python3 backlog-tool.py [context-dir]
@@ -15,11 +15,15 @@ Keys:
   p             Edit plan file          x       Edit research file
   n             New feature             d       Delete feature
   r             Reload from disk        Ctrl+r  Restart process
+  c             Toggle Claude pane
   q             Quit
 """
 
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -74,6 +78,39 @@ STATUS_COLORS = {
     "in-progress":     "#f59e0b",
     "shipped":         "#22c55e",
     "parked":          "#ef4444",
+}
+
+# Claude pane launcher
+CLAUDE_BIN = shutil.which("claude") or "claude"
+
+# Per-tab brief templates. Substitution keys: {fid}, {name}, {ctx}, {spec_filename},
+# {plan_filename}, {research_filename}. {ctx} is the basename of the context dir
+# (e.g. "context") so the brief uses a project-root-relative path.
+CLAUDE_PROMPTS = {
+    "description": (
+        'We\'re refining feature {fid} — "{name}". Spec: {ctx}/{spec_filename}. '
+        'Help me sharpen the description, scope, and open questions; propose edits I '
+        'can apply to the spec. Stay in dialogue — do not write to the spec without confirmation.'
+    ),
+    "plan_new": (
+        'Draft an implementation plan for feature {fid} — "{name}". '
+        'Spec: {ctx}/{spec_filename}. Write the plan to {ctx}/{plan_filename}. '
+        'Use markdown with sections: Overview, Files to change, Step-by-step, Risks, Test plan.'
+    ),
+    "plan_existing": (
+        'Refine the implementation plan for feature {fid} — "{name}". '
+        'Spec: {ctx}/{spec_filename}. Existing plan: {ctx}/{plan_filename}. '
+        'Update the plan in place to reflect any new constraints or feedback I share.'
+    ),
+    "research_new": (
+        'Research feature {fid} — "{name}". Spec: {ctx}/{spec_filename}. '
+        'Investigate open questions and unknowns; capture findings in '
+        '{ctx}/{research_filename} with source links where possible.'
+    ),
+    "research_existing": (
+        'Continue research on feature {fid} — "{name}". Spec: {ctx}/{spec_filename}. '
+        'Existing notes: {ctx}/{research_filename}. Extend or revise as we discuss new angles.'
+    ),
 }
 
 
@@ -218,8 +255,23 @@ def load_associated_body(context_dir: Path, filename: str) -> str:
 
 
 def save_backlog_index(context_dir: Path, features: list[Feature]):
+    backlog = context_dir / "backlog.md"
+    # Preserve the user's custom H1 title if one is already in the file.
+    title = "# Feature Backlog"
+    existing_decision_log = None
+    if backlog.exists():
+        old_text = backlog.read_text(encoding="utf-8")
+        for line in old_text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                title = stripped
+                break
+        m = re.search(r"(---\s*\n## Decision Log.*)", old_text, re.DOTALL)
+        if m:
+            existing_decision_log = m.group(1)
+
     lines = [
-        "# Feature Backlog — Cannon Defence 360", "",
+        title, "",
         "> Lean index of all features. Each row links to a detailed feature file.",
         "> Open the feature file to see full scope, design notes, dependencies, and open questions.",
         "", "## Category Key",
@@ -235,7 +287,7 @@ def save_backlog_index(context_dir: Path, features: list[Feature]):
         "- **ready** — Scoped and ready to build",
         "- **in-progress** — Under active development",
         "- **to-review** — Implementation done, awaiting review",
-        "- **shipped** — Live in App Store",
+        "- **shipped** — Live",
         "- **parked** — Deprioritized or blocked",
         "", "---", "",
         "| # | Feature | Category | Status | File |",
@@ -244,11 +296,8 @@ def save_backlog_index(context_dir: Path, features: list[Feature]):
     for f in features:
         lines.append(f"| {f.fid} | {f.name} | {f.category} | {f.status} | `{f.filename}` |")
     lines.append("")
-    backlog = context_dir / "backlog.md"
-    if backlog.exists():
-        old_text = backlog.read_text(encoding="utf-8")
-        m = re.search(r"(---\s*\n## Decision Log.*)", old_text, re.DOTALL)
-        if m: lines.append(m.group(1))
+    if existing_decision_log:
+        lines.append(existing_decision_log)
     lines.append("")
     backlog.write_text("\n".join(lines), encoding="utf-8")
 
@@ -335,7 +384,7 @@ class NewFeatureScreen(ModalScreen):
         yield Vertical(
             Label(" New Feature ", id="dialog-title"),
             Label("Feature name:"),
-            Input(id="feat-name", placeholder="e.g. Cannon skins"),
+            Input(id="feat-name", placeholder="e.g. Dark mode"),
             Label(""),
             Label("[Enter] Create  [Escape] Cancel", id="dialog-hint"),
             id="dialog",
@@ -452,6 +501,59 @@ class ConfirmDeleteScreen(ModalScreen):
             self.dismiss(True)
         else:
             self.dismiss(False)
+
+    def action_cancel(self):
+        if not self._dismissed:
+            self._dismissed = True
+            self.dismiss(False)
+
+
+# ── Confirm close Claude pane dialog ──────────────────────────────────
+
+class ConfirmCloseClaudeScreen(ModalScreen):
+    """Asks user to confirm closing the active Claude pane when switching tabs."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
+    DEFAULT_CSS = """
+    ConfirmCloseClaudeScreen { align: center middle; }
+    #cc-box {
+        width: 56;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #cc-title { text-style: bold; margin-bottom: 1; }
+    #cc-hint { color: $text-muted; margin-top: 1; }
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._dismissed = False
+        self._list_height = 2 + 4
+        self._box_height = self._list_height + 6
+
+    def compose(self):
+        box = Vertical(id="cc-box")
+        box.styles.height = self._box_height
+        with box:
+            yield Label(" Switching tab will close the Claude pane ", id="cc-title")
+            ol = OptionList(
+                Option("  Close pane and switch", id="confirm"),
+                Option("  Cancel", id="cancel"),
+                id="cc-list",
+            )
+            ol.styles.height = self._list_height
+            yield ol
+            yield Label("[↑/↓] Navigate  [Enter] Select  [Esc] Cancel", id="cc-hint")
+
+    def on_mount(self):
+        self.query_one("#cc-list", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected):
+        if not self._dismissed:
+            self._dismissed = True
+            self.dismiss(event.option.id == "confirm")
 
     def action_cancel(self):
         if not self._dismissed:
@@ -745,7 +847,7 @@ class BacklogApp(App):
     DataTable > .datatable--cursor { background: $accent; color: $text; }
     """
 
-    TITLE = "Cannon Defence 360 — Backlog"
+    TITLE = "Backlog"
     BINDINGS = [
         # Letter keys: NO priority — so they type normally in TextArea
         Binding("s", "save", "Save backlog"),
@@ -754,6 +856,7 @@ class BacklogApp(App):
         Binding("x", "edit_research", "Research"),
         Binding("n", "new_feature", "New"),
         Binding("d", "delete_feature", "Delete"),
+        Binding("c", "toggle_claude", "Claude"),
         Binding("r", "reload", "Reload"),
         # Modifier keys: priority OK — won't conflict with typing
         Binding("ctrl+s", "save", "Save", priority=True, show=False),
@@ -782,6 +885,11 @@ class BacklogApp(App):
         self._script_mtime: float = self._script_path.stat().st_mtime
         self._update_available: bool = False
         self._ratio_idx: int = self.DEFAULT_RATIO_IDX
+        self._claude_pane_id: str | None = None
+        # Title shows the project folder (parent of context dir) so multiple
+        # backlogs on screen are distinguishable.
+        project_name = context_dir.parent.resolve().name or "Backlog"
+        self.title = f"{project_name} — Backlog"
         self._load_features()
 
     def _load_features(self):
@@ -870,7 +978,7 @@ class BacklogApp(App):
                 yield DataTable(id="feature-table")
             yield DetailPane(id="detail-pane")
         yield Static("", id="update-bar")
-        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  s save  │  \\[/] resize", id="status-bar")
+        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  │  s save  │  \\[/] resize", id="status-bar")
         yield Footer()
 
     def on_mount(self):
@@ -1111,14 +1219,29 @@ class BacklogApp(App):
     # ── Tab switching ─────────────────────────────────────────────────
 
     def _switch_tab(self, target: str):
-        """Switch to a tab, checking for unsaved editor changes first."""
+        """Switch to a tab, checking for an open Claude pane and unsaved edits."""
         feature = self._current_feature()
         if not feature:
             return
         if target == self._active_tab and self.editing:
             return  # already editing this tab
 
-        # If editing with unsaved text changes, ask what to do
+        # If a live Claude pane exists for the prior tab, confirm closing it first.
+        if (target != self._active_tab
+                and self._claude_pane_id
+                and self._tmux_pane_alive(self._claude_pane_id)):
+            def on_claude_confirm(confirmed: bool | None):
+                if not confirmed:
+                    return
+                self._close_claude_pane()
+                self._continue_switch_tab(target, respawn_claude=True)
+            self.push_screen(ConfirmCloseClaudeScreen(), on_claude_confirm)
+            return
+
+        self._continue_switch_tab(target, respawn_claude=False)
+
+    def _continue_switch_tab(self, target: str, respawn_claude: bool):
+        """Tab switch after Claude-pane confirmation; handles unsaved-edit prompt."""
         if self.editing:
             body_widget = self.query_one("#detail-body", TextArea)
             if body_widget.text != self._edit_snapshot:
@@ -1127,13 +1250,19 @@ class BacklogApp(App):
                         self._commit_editor_text()
                         self._do_save_all()
                         self._do_switch_tab(target)
+                        if respawn_claude:
+                            self._open_claude_pane(self._current_feature())
                     elif result == "discard":
                         self._do_switch_tab(target)
+                        if respawn_claude:
+                            self._open_claude_pane(self._current_feature())
                     # "cancel" — do nothing
                 self.push_screen(ConfirmSwitchScreen(), on_confirm)
                 return
 
         self._do_switch_tab(target)
+        if respawn_claude:
+            self._open_claude_pane(self._current_feature())
 
     def _do_switch_tab(self, target: str):
         """Actually perform the tab switch and enter edit mode."""
@@ -1194,6 +1323,112 @@ class BacklogApp(App):
                 docs_saved += 1
         save_backlog_index(self.context_dir, self.features)
         return saved, docs_saved
+
+    # ── Claude pane launcher ──────────────────────────────────────────
+
+    def _build_claude_prompt(self, feature: Feature) -> str:
+        ctx = self.context_dir.name
+        spec = feature.filename
+        plan_filename = feature.plan_file or feature.plan_filename_for()
+        research_filename = feature.research_file or feature.research_filename_for()
+        # Whether the on-disk file actually exists. has_plan / has_research can be
+        # true purely from the user opening the tab (in-memory placeholder).
+        plan_exists = (self.context_dir / plan_filename).exists()
+        research_exists = (self.context_dir / research_filename).exists()
+
+        if self._active_tab == "plan":
+            key = "plan_existing" if plan_exists else "plan_new"
+        elif self._active_tab == "research":
+            key = "research_existing" if research_exists else "research_new"
+        else:
+            key = "description"
+
+        return CLAUDE_PROMPTS[key].format(
+            fid=feature.fid,
+            name=feature.name,
+            ctx=ctx,
+            spec_filename=spec,
+            plan_filename=plan_filename,
+            research_filename=research_filename,
+        )
+
+    def _tmux_pane_alive(self, pane_id: str) -> bool:
+        try:
+            out = subprocess.check_output(
+                ["tmux", "list-panes", "-a", "-F", "#{pane_id}"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+        return pane_id in out.split()
+
+    def _open_claude_pane(self, feature: Feature | None) -> None:
+        if feature is None:
+            return
+        prompt = self._build_claude_prompt(feature)
+        cwd = str(self.context_dir.parent)
+
+        if os.environ.get("TMUX"):
+            # Single shell-command string with proper quoting; `exec` so the pane
+            # closes when claude exits instead of leaving an idle shell behind.
+            shell_cmd = f"exec {shlex.quote(CLAUDE_BIN)} {shlex.quote(prompt)}"
+            try:
+                out = subprocess.check_output(
+                    [
+                        "tmux", "split-window", "-h",
+                        "-c", cwd,
+                        "-P", "-F", "#{pane_id}",
+                        shell_cmd,
+                    ],
+                    text=True,
+                    stderr=subprocess.PIPE,
+                ).strip()
+                self._claude_pane_id = out or None
+                self._set_status(f"Claude pane opened ({self._active_tab}) — pane {out}")
+            except subprocess.CalledProcessError as e:
+                msg = (e.stderr or "").strip() or str(e)
+                self._set_status(f"tmux split failed: {msg}")
+            except FileNotFoundError:
+                self._set_status("tmux not found on PATH")
+        else:
+            # No tmux — hand the terminal to Claude full-screen.
+            self._claude_pane_id = None
+            try:
+                with self.suspend():
+                    subprocess.run([CLAUDE_BIN, prompt], cwd=cwd)
+            except FileNotFoundError:
+                self._set_status(f"claude not found on PATH (tried {CLAUDE_BIN})")
+                return
+            self._set_status("Claude exited — back to backlog")
+
+    def _close_claude_pane(self) -> None:
+        if not self._claude_pane_id:
+            return
+        try:
+            subprocess.run(
+                ["tmux", "kill-pane", "-t", self._claude_pane_id],
+                check=False,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            pass
+        self._claude_pane_id = None
+
+    def action_toggle_claude(self) -> None:
+        if self.editing:
+            return
+        feature = self._current_feature()
+        if feature is None:
+            self._set_status("No feature selected — move cursor to a feature row.")
+            return
+        if self._claude_pane_id and self._tmux_pane_alive(self._claude_pane_id):
+            self._close_claude_pane()
+            self._set_status("Claude pane closed.")
+        else:
+            # Stale id (user exited Claude themselves) — clear it before re-opening.
+            self._claude_pane_id = None
+            self._open_claude_pane(feature)
 
     # ── Actions ────────────────────────────────────────────────────────
 
