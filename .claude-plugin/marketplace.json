@@ -15,6 +15,16 @@
       },
       "source": "./backlog-tool",
       "category": "productivity"
+    },
+    {
+      "name": "deployed-artifacts",
+      "description": "List all publicly deployed digital artifacts (Pages + Vercel) with live URLs and last-commit recency",
+      "version": "1.0.0",
+      "author": {
+        "name": "Par Lindhe"
+      },
+      "source": "./deployed-artifacts",
+      "category": "productivity"
     }
   ]
 }
