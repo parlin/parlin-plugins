@@ -17,6 +17,16 @@
       "category": "productivity"
     },
     {
+      "name": "apple-dev",
+      "description": "Apple platform development helpers — /build-to-phone (install on a physical device) and /testflight (archive + upload to App Store Connect)",
+      "version": "1.1.0",
+      "author": {
+        "name": "Par Lindhe"
+      },
+      "source": "./apple-dev",
+      "category": "development"
+    },
+    {
       "name": "deployed-artifacts",
       "description": "List all publicly deployed digital artifacts (Pages + Vercel) with live URLs and last-commit recency",
       "version": "1.0.0",

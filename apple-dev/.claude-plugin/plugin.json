@@ -1,0 +1,9 @@
+{
+  "name": "apple-dev",
+  "description": "Apple platform development helpers — /build-to-phone (install on a physical device) and /testflight (archive + upload to App Store Connect)",
+  "version": "1.1.0",
+  "author": {
+    "name": "Pelle"
+  },
+  "license": "MIT"
+}
