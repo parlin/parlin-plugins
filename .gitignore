@@ -1,4 +1,79 @@
+# ---------------------------------------------------------------
+# Secrets & environment  (NEVER commit these)
+# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p8
+*.p12
+*.mobileprovision
+secrets.json
+credentials.json
+
+# ---------------------------------------------------------------
+# Local-only context for AI agents (plans, notes, screenshots).
+# Not published to the public marketplace repo.
+# ---------------------------------------------------------------
+context/
+*.local.md
+
+# Claude Code per-machine overrides (the shared .claude-plugin/ IS tracked)
+.claude/settings.local.json
+
+# ---------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------
 __pycache__/
+*.py[cod]
 *.egg-info/
-.DS_Store
 build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---------------------------------------------------------------
+# Node (in case a plugin grows a JS toolchain)
+# ---------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.next/
+.turbo/
+
+# ---------------------------------------------------------------
+# macOS
+# ---------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ---------------------------------------------------------------
+# Editors & tooling
+# ---------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.direnv/
+
+# ---------------------------------------------------------------
+# Logs & scratch
+# ---------------------------------------------------------------
+*.log
+tmp/
+scratch/
