@@ -1573,11 +1573,11 @@ class BacklogApp(App):
 
     # ── Claude pane launcher ──────────────────────────────────────────
 
-    def _format_prompt(self, key: str, feature: Feature) -> str:
+    def _format_prompt(self, key: str, feature: Feature, ctx: str | None = None) -> str:
         return CLAUDE_PROMPTS[key].format(
             fid=feature.fid,
             name=feature.name,
-            ctx=self.context_dir.name,
+            ctx=ctx or self.context_dir.name,
             spec_filename=feature.filename,
             plan_filename=feature.plan_file or feature.plan_filename_for(),
             research_filename=feature.research_file or feature.research_filename_for(),
@@ -1699,7 +1699,26 @@ class BacklogApp(App):
 
         plan_filename = feature.plan_file or feature.plan_filename_for()
         plan_exists = (self.context_dir / plan_filename).exists()
-        prompt = self._format_prompt("implement" if plan_exists else "implement_no_plan", feature)
+        key = "implement" if plan_exists else "implement_no_plan"
+
+        # Rule: implementations run in an isolated git worktree so parallel
+        # agents never share a working directory. Backlog files stay in the
+        # main checkout (context/ is typically gitignored and absent from
+        # worktrees) — the brief points there absolutely, which also keeps
+        # the agent watch seeing status/checkbox updates live.
+        worktree = self._prepare_worktree(feature)
+        if worktree:
+            cwd, branch = worktree
+            prompt = self._format_prompt(key, feature, ctx=str(self.context_dir.resolve()))
+            prompt += (
+                f" You are working in an isolated git worktree at {cwd} on branch "
+                f"{branch}: implement and commit there; do not merge. The backlog "
+                f"files referenced above live in the main checkout — update the "
+                f"plan checkboxes and status there."
+            )
+        else:
+            cwd = str(self.context_dir.parent)
+            prompt = self._format_prompt(key, feature)
 
         # Flush everything to disk first — the agent reads files, not our memory —
         # and mark the feature in-progress so backlog.md reflects reality.
@@ -1707,17 +1726,53 @@ class BacklogApp(App):
         self._do_save_all()
 
         if TMUX_BIN:
-            self._launch_agent_session(feature, prompt)
+            self._launch_agent_session(feature, prompt, cwd)
         else:
-            self._launch_claude_window(feature, prompt)
+            self._launch_claude_window(feature, prompt, cwd)
         self._refresh_table(preserve_cursor=True)
         self._update_detail()
 
-    def _launch_agent_session(self, feature: Feature, prompt: str) -> None:
+    def _prepare_worktree(self, feature: Feature) -> tuple[str, str] | None:
+        """Create (or reuse) .worktrees/<FID-slug> on branch impl/<FID-slug>.
+        Returns (path, branch), or None to run in the project root (not a git
+        repo, or git failed). The .worktrees/ dir is excluded via
+        .git/info/exclude so it never shows up as untracked noise."""
+        root = self.context_dir.parent.resolve()
+        def git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(["git", "-C", str(root), *args],
+                                  capture_output=True, text=True)
+        if git("rev-parse", "--is-inside-work-tree").returncode != 0:
+            return None
+
+        slug = feature.filename.removesuffix(".md")
+        wt_path = root / ".worktrees" / slug
+        branch = f"impl/{slug}"
+        if wt_path.is_dir():
+            return str(wt_path), branch  # relaunch: reuse the existing worktree
+
+        common = git("rev-parse", "--git-common-dir").stdout.strip()
+        exclude = (root / common if not os.path.isabs(common) else Path(common)) / "info" / "exclude"
+        try:
+            existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+            if ".worktrees/" not in existing:
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                exclude.write_text(existing.rstrip("\n") + "\n.worktrees/\n", encoding="utf-8")
+        except OSError:
+            pass  # cosmetic only
+
+        git("worktree", "prune")
+        res = git("worktree", "add", str(wt_path), "-b", branch)
+        if res.returncode != 0 and "already exists" in res.stderr:
+            res = git("worktree", "add", str(wt_path), branch)  # branch left from earlier run
+        if res.returncode != 0:
+            self._set_status(f"worktree failed ({res.stderr.strip().splitlines()[-1] if res.stderr else '?'}) — running in project root")
+            return None
+        return str(wt_path), branch
+
+    def _launch_agent_session(self, feature: Feature, prompt: str, cwd: str) -> None:
         """Start the agent in a detached tmux session and show its Agent tab.
         The session outlives the TUI — rediscovered on restart by _poll_agents."""
         name = self._session_name(feature.fid)
-        cwd = str(self.context_dir.parent)
         shell_cmd = f"exec {shlex.quote(CLAUDE_BIN)} {shlex.quote(prompt)}"
         try:
             subprocess.check_output(
@@ -1763,11 +1818,11 @@ class BacklogApp(App):
         else:
             self._set_status(f"Attach manually: tmux attach -t {name}")
 
-    def _launch_claude_window(self, feature: Feature, prompt: str) -> None:
+    def _launch_claude_window(self, feature: Feature, prompt: str, cwd: str | None = None) -> None:
         """Run claude in a new tmux window (implementation is long-running, so a
         split would crowd out the backlog). Outside tmux, open a new terminal
         window on macOS — never take over the tab the backlog is running in."""
-        cwd = str(self.context_dir.parent)
+        cwd = cwd or str(self.context_dir.parent)
         if os.environ.get("TMUX"):
             shell_cmd = f"exec {shlex.quote(CLAUDE_BIN)} {shlex.quote(prompt)}"
             window_name = f"impl-{feature.fid}"
