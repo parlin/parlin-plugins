@@ -101,8 +101,8 @@ Press `c` on a feature row to launch an interactive Claude Code session briefed 
 - **Plan tab** — Claude drafts or refines `FXX-…-plan.md`.
 - **Research tab** — Claude investigates and writes findings to `FXX-…-research.md`.
 
+Inside `tmux`, the pane opens as a vertical split next to the TUI. Outside `tmux`, the TUI suspends and Claude takes the full terminal until you exit. Press `c` again to close the pane; switching tabs while a pane is open will prompt to close and respawn with the new brief.
+
 ### Agent watch
 
 The TUI watches the context directory (2s poll) and auto-reloads when files change on disk — so when Claude (or any agent, or another editor) writes to a spec, plan, or research file, you see it immediately. Your unsaved local edits are never clobbered: if disk changes arrive while you have unsaved work, a banner appears instead and `r` reloads when you're ready. Press `a` to toggle the watch.
-
-Inside `tmux`, the pane opens as a vertical split next to the TUI. Outside `tmux`, the TUI suspends and Claude takes the full terminal until you exit. Press `c` again to close the pane; switching tabs while a pane is open will prompt to close and respawn with the new brief.
