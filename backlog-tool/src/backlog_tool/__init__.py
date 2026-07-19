@@ -125,6 +125,7 @@ class Feature:
         self.filename = filename
         self.body = body
         self.dirty = False
+        self._backlog_pos: int = 0  # order from backlog.md; renumbered on manual reorder
         # Associated doc filenames (set by _detect_associated_files)
         self.plan_file: str | None = None
         self.research_file: str | None = None
@@ -878,6 +879,8 @@ class BacklogApp(App):
         self._last_cursor_row: int = 0
         self._reload_confirmed: bool = False
         self._restart_confirmed: bool = False
+        self._quit_confirmed: bool = False
+        self._order_dirty: bool = False  # manual reorder not yet written to backlog.md
         self._picker_open: bool = False
         self._active_tab: str = "description"  # "description", "plan", or "research"
         self._edit_snapshot: str = ""  # original text when editing started
@@ -919,7 +922,7 @@ class BacklogApp(App):
                 feature.research_body = load_associated_body(self.context_dir, research_name)
 
     def _sort_features(self):
-        self.features.sort(key=lambda f: (CAT_ORDER.get(f.category, 99), getattr(f, '_backlog_pos', 0)))
+        self.features.sort(key=lambda f: (CAT_ORDER.get(f.category, 99), f._backlog_pos))
 
     def _apply_backlog_order(self):
         """Read backlog.md table — the single source of truth for order, status, and category."""
@@ -1132,6 +1135,9 @@ class BacklogApp(App):
         if self._restart_confirmed and event.key != "ctrl+r":
             self._restart_confirmed = False
             self._set_status("Restart cancelled")
+        if self._quit_confirmed and event.key != "q":
+            self._quit_confirmed = False
+            self._set_status("Quit cancelled")
 
         # Shift+arrow: reorder within category
         if event.key == "shift+up":
@@ -1204,6 +1210,11 @@ class BacklogApp(App):
             return
 
         self.features[feat_idx], self.features[target_idx] = self.features[target_idx], self.features[feat_idx]
+        # Renumber positions so a later _sort_features() keeps this order —
+        # without this, any re-sort (e.g. a category change) reverts the move.
+        for i, f in enumerate(self.features):
+            f._backlog_pos = i
+        self._order_dirty = True
 
         table = self.query_one("#feature-table", DataTable)
         col = table.cursor_column
@@ -1307,6 +1318,16 @@ class BacklogApp(App):
         else:
             feature.set_body(body_widget.text)
 
+    def _unsaved_count(self) -> int:
+        """Count unsaved work: dirty specs, plan/research docs, and pending reorders.
+        This is what quit/reload/restart warnings must use — checking only
+        f.dirty misses doc edits and manual reordering."""
+        n = sum(
+            1 for f in self.features
+            if f.dirty or (f._plan_dirty and f.plan_file) or (f._research_dirty and f.research_file)
+        )
+        return n + (1 if self._order_dirty else 0)
+
     def _do_save_all(self) -> tuple[int, int]:
         """Write all dirty features and docs to disk. Returns (saved, docs_saved)."""
         saved = 0
@@ -1322,6 +1343,7 @@ class BacklogApp(App):
                 save_associated_file(self.context_dir, f, "research")
                 docs_saved += 1
         save_backlog_index(self.context_dir, self.features)
+        self._order_dirty = False
         return saved, docs_saved
 
     # ── Claude pane launcher ──────────────────────────────────────────
@@ -1472,15 +1494,16 @@ class BacklogApp(App):
         self._set_status(f"Saved {saved} feature(s){extra} + backlog.md \u2713")
 
     def action_reload(self):
-        dirty = [f for f in self.features if f.dirty]
-        if dirty and not self._reload_confirmed:
+        unsaved = self._unsaved_count()
+        if unsaved and not self._reload_confirmed:
             self._reload_confirmed = True
-            self._set_status(f"⚠ {len(dirty)} unsaved change(s) will be lost — press \\[r] again to confirm, any other key to cancel")
+            self._set_status(f"⚠ {unsaved} unsaved change(s) will be lost — press \\[r] again to confirm, any other key to cancel")
             return
-        self._do_reload(discard_count=len(dirty))
+        self._do_reload(discard_count=unsaved)
 
     def _do_reload(self, discard_count: int = 0):
         self._reload_confirmed = False
+        self._order_dirty = False
         if self.editing:
             self.editing = False
         self._active_tab = "description"
@@ -1566,10 +1589,10 @@ class BacklogApp(App):
         self.push_screen(ConfirmDeleteScreen(feature.fid, feature.name), on_confirm)
 
     def action_restart(self):
-        dirty = [f for f in self.features if f.dirty]
-        if dirty and not self._restart_confirmed:
+        unsaved = self._unsaved_count()
+        if unsaved and not self._restart_confirmed:
             self._restart_confirmed = True
-            self._set_status(f"⚠ {len(dirty)} unsaved change(s) will be lost — press \\[Ctrl+R] again to confirm, any other key to cancel")
+            self._set_status(f"⚠ {unsaved} unsaved change(s) will be lost — press \\[Ctrl+R] again to confirm, any other key to cancel")
             return
         self._do_restart()
 
@@ -1578,12 +1601,12 @@ class BacklogApp(App):
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def action_quit_app(self):
-        dirty = [f for f in self.features if f.dirty]
-        if dirty:
-            self._set_status(f"⚠ {len(dirty)} unsaved change(s) — press \\[s] to save or \\[q] again to quit")
-            self.action_quit_app = self._force_quit
-        else:
-            self.exit()
+        unsaved = self._unsaved_count()
+        if unsaved and not self._quit_confirmed:
+            self._quit_confirmed = True
+            self._set_status(f"⚠ {unsaved} unsaved change(s) — press \\[s] to save or \\[q] again to quit")
+            return
+        self.exit()
 
     def _apply_pane_ratio(self):
         left, right = self.PANE_RATIOS[self._ratio_idx]
@@ -1604,9 +1627,6 @@ class BacklogApp(App):
         if self._ratio_idx < len(self.PANE_RATIOS) - 1:
             self._ratio_idx += 1
             self._apply_pane_ratio()
-
-    def _force_quit(self):
-        self.exit()
 
 
 # ── Init scaffolding ──────────────────────────────────────────────────
