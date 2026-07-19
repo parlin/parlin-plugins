@@ -16,7 +16,7 @@ Keys:
   n             New feature             d       Delete feature
   r             Reload from disk        Ctrl+r  Restart process
   c             Toggle Claude pane      i       Initiate implementation
-  q             Quit
+  o             Open agent interactive  q       Quit
 
 Files changed on disk (e.g. by an agent) reload automatically; unsaved
 local edits are never clobbered — a banner offers \\[r] instead.
@@ -53,6 +53,7 @@ from textual.widgets import (
     Input,
 )
 from textual.widgets.option_list import Option
+from rich.text import Text
 
 # ── Constants ──────────────────────────────────────────────────────────
 
@@ -85,6 +86,26 @@ STATUS_COLORS = {
 
 # Claude pane launcher
 CLAUDE_BIN = shutil.which("claude") or "claude"
+TMUX_BIN = shutil.which("tmux")
+
+# Agent sessions live in detached tmux sessions named <prefix><FID>; the TUI
+# mirrors them via capture-pane (see F01 plan). Best-effort patterns that mean
+# the agent is waiting for a human answer (permission prompts etc.).
+NEEDS_INPUT_RE = re.compile(
+    r"do you want|allow this|\(y/n\)|\d\.\s*yes\b|press enter to continue", re.IGNORECASE
+)
+AGENT_TAB_LABELS = {"running": "Agent ⚙", "attention": "Agent ✋", "done": "Agent ✓"}
+AGENT_ROW_MARKERS = {"running": " [#3b82f6]⚙[/]", "attention": " [bold #f59e0b]✋[/]", "done": " [#22c55e]✓[/]"}
+
+
+def _tmux_out(*args: str) -> str | None:
+    """Run a tmux command, returning stdout, or None on any failure."""
+    if not TMUX_BIN:
+        return None
+    try:
+        return subprocess.check_output([TMUX_BIN, *args], text=True, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
 
 # Per-tab brief templates. Substitution keys: {fid}, {name}, {ctx}, {spec_filename},
 # {plan_filename}, {research_filename}. {ctx} is the basename of the context dir
@@ -601,18 +622,27 @@ class TabBar(Static, can_focus=True):
 
     def __init__(self, **kwargs):
         super().__init__("", **kwargs)
+        self.tab_ids: list[str] = list(self.TAB_IDS)  # per-feature; may gain "agent"
         self._labels: dict[str, str] = {
             "description": "Description",
             "plan": "Plan +",
             "research": "Research +",
+            "agent": "Agent",
         }
         self._focused_idx: int = 0
         self._active_id: str = "description"
         self._tab_ranges: list[tuple[int, int]] = []  # (start_x, end_x) per tab
 
+    def set_tabs(self, tab_ids: list[str]):
+        if tab_ids != self.tab_ids:
+            self.tab_ids = list(tab_ids)
+            if self._focused_idx >= len(self.tab_ids):
+                self._focused_idx = len(self.tab_ids) - 1
+            self._refresh_display()
+
     def set_active(self, tab_id: str):
         self._active_id = tab_id
-        for i, t in enumerate(self.TAB_IDS):
+        for i, t in enumerate(self.tab_ids):
             if t == tab_id:
                 self._focused_idx = i
                 break
@@ -627,7 +657,7 @@ class TabBar(Static, can_focus=True):
         self._tab_ranges = []
         offset = 0
         has_focus = self.has_focus
-        for i, tid in enumerate(self.TAB_IDS):
+        for i, tid in enumerate(self.tab_ids):
             label = self._labels[tid]
             is_active = tid == self._active_id
             is_focused = i == self._focused_idx and has_focus
@@ -665,13 +695,13 @@ class TabBar(Static, can_focus=True):
             event.prevent_default()
             event.stop()
         elif event.key == "right":
-            if self._focused_idx < len(self.TAB_IDS) - 1:
+            if self._focused_idx < len(self.tab_ids) - 1:
                 self._focused_idx += 1
                 self._refresh_display()
             event.prevent_default()
             event.stop()
         elif event.key in ("enter", "space"):
-            self.post_message(self.TabActivated(self.TAB_IDS[self._focused_idx]))
+            self.post_message(self.TabActivated(self.tab_ids[self._focused_idx]))
             event.prevent_default()
             event.stop()
 
@@ -680,7 +710,7 @@ class TabBar(Static, can_focus=True):
         for i, (start, end) in enumerate(self._tab_ranges):
             if start <= x < end:
                 self._focused_idx = i
-                self.post_message(self.TabActivated(self.TAB_IDS[i]))
+                self.post_message(self.TabActivated(self.tab_ids[i]))
                 self._refresh_display()
                 return
 
@@ -702,6 +732,8 @@ class DetailPane(Widget):
     #detail-body-md { height: 1fr; }
     #detail-body-md.hidden { display: none; }
     #detail-body.hidden { display: none; }
+    #detail-body-term { height: 1fr; overflow-y: auto; background: #101010; padding: 0 1; }
+    #detail-body-term.hidden { display: none; }
     #editor-save-bar {
         dock: bottom;
         height: 1;
@@ -731,13 +763,20 @@ class DetailPane(Widget):
         yield TabBar(id="tab-bar")
         yield Markdown("", id="detail-body-md")
         yield TextArea("", id="detail-body", language="markdown", classes="hidden")
+        yield Static("", id="detail-body-term", classes="hidden")
         with Horizontal(id="editor-save-bar"):
             yield Static("", id="save-hint", classes="save-hint")
             yield Button("Save", id="editor-save-btn", variant="success")
 
-    def set_active_tab(self, tab: str, feature: Feature | None = None):
-        """Highlight the active tab and update file-exists indicators."""
+    def set_active_tab(self, tab: str, feature: Feature | None = None, agent_state: str | None = None):
+        """Highlight the active tab, update file-exists indicators, and show
+        the Agent tab when this feature has (or had) an agent session."""
         tab_bar = self.query_one("#tab-bar", TabBar)
+        tabs = list(TabBar.TAB_IDS)
+        if agent_state:
+            tabs.append("agent")
+            tab_bar.set_label("agent", AGENT_TAB_LABELS.get(agent_state, "Agent"))
+        tab_bar.set_tabs(tabs)
         tab_bar.set_active(tab)
         if feature:
             tab_bar.set_label("plan", "Plan \u25cf" if feature.has_plan else "Plan +")
@@ -768,15 +807,28 @@ class DetailPane(Widget):
         if not md_widget.has_class("hidden") and event.chain >= 2:
             self.post_message(self.EditRequested())
 
-    def update_content(self, feature: Feature | None, editing: bool = False, active_tab: str = "description"):
+    def show_agent_capture(self, capture: str, ended: bool = False):
+        """Render captured agent-terminal output in the terminal view."""
+        term = self.query_one("#detail-body-term", Static)
+        if not capture.strip():
+            term.update("(waiting for agent output\u2026)")
+            return
+        text = Text.from_ansi(capture.rstrip("\n"))
+        if ended:
+            text.append("\n\n\u2014 session ended \u2014", style="bold green")
+        term.update(text)
+
+    def update_content(self, feature: Feature | None, editing: bool = False, active_tab: str = "description",
+                       agent_state: str | None = None, agent_capture: str = ""):
         """Update the detail pane."""
         header = self.query_one("#detail-header", Static)
         meta = self.query_one("#detail-meta", Static)
         body = self.query_one("#detail-body", TextArea)
         body_md = self.query_one("#detail-body-md", Markdown)
+        term = self.query_one("#detail-body-term", Static)
 
         self.show_save_bar(False)
-        self.set_active_tab(active_tab, feature)
+        self.set_active_tab(active_tab, feature, agent_state)
 
         if feature is None:
             header.update("No feature selected")
@@ -784,6 +836,7 @@ class DetailPane(Widget):
             body.load_text("")
             body.read_only = True
             body.add_class("hidden")
+            term.add_class("hidden")
             body_md.remove_class("hidden")
             body_md.update("")
             return
@@ -792,11 +845,22 @@ class DetailPane(Widget):
         mode_label = ""
         if editing:
             mode_label = f"  [bold #f59e0b]editing {active_tab}[/]"
+        elif active_tab == "agent":
+            mode_label = "  [#6b7280]read-only agent view \u2014 \\[o] open interactive[/]"
         header.update(f"[bold]{feature.fid}: {feature.name}[/bold]{dirty}{mode_label}")
 
         cc = CAT_COLORS.get(feature.category, "white")
         sc = STATUS_COLORS.get(feature.status, "white")
         meta.update(f"Category: [{cc}]{feature.category}[/]  Status: [{sc}]{feature.status}[/]  File: {feature.filename}")
+
+        # Agent tab: live terminal mirror \u2014 no editor, no markdown.
+        if active_tab == "agent":
+            body.add_class("hidden")
+            body_md.add_class("hidden")
+            term.remove_class("hidden")
+            self.show_agent_capture(agent_capture, ended=(agent_state == "done"))
+            return
+        term.add_class("hidden")
 
         # Load content based on active tab
         if active_tab == "plan":
@@ -876,6 +940,7 @@ class BacklogApp(App):
         Binding("d", "delete_feature", "Delete"),
         Binding("c", "toggle_claude", "Claude"),
         Binding("i", "implement", "Implement"),
+        Binding("o", "open_agent_attach", "Attach", show=False),
         Binding("r", "reload", "Reload"),
         # Modifier keys: priority OK — won't conflict with typing
         Binding("ctrl+s", "save", "Save", priority=True, show=False),
@@ -908,6 +973,11 @@ class BacklogApp(App):
         self._ratio_idx: int = self.DEFAULT_RATIO_IDX
         self._claude_pane_id: str | None = None
         self._fs_pending: bool = False  # disk changed while local edits were unsaved
+        # Agent sessions (detached tmux, mirrored read-only — see F01 plan)
+        self._agent_alive: set[str] = set()          # fids with a live session
+        self._agent_attention: dict[str, bool] = {}  # fid -> waiting for input?
+        self._agent_done: set[str] = set()           # sessions that ended this run
+        self._agent_last_capture: dict[str, str] = {}
         # Title shows the project folder (parent of context dir) so multiple
         # backlogs on screen are distinguishable.
         project_name = context_dir.parent.resolve().name or "Backlog"
@@ -1001,12 +1071,14 @@ class BacklogApp(App):
                 yield DataTable(id="feature-table")
             yield DetailPane(id="detail-pane")
         yield Static("", id="update-bar")
-        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  │  s save  │  \\[/] resize", id="status-bar")
+        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  i impl  │  s save  │  \\[/] resize", id="status-bar")
         yield Footer()
 
     def on_mount(self):
         self.set_interval(3.0, self._check_for_update)
         self.set_interval(2.0, self._check_fs_changes)
+        self.set_interval(3.0, self._poll_agents)
+        self.set_interval(1.0, self._poll_agent_view)
         table = self.query_one("#feature-table", DataTable)
         table.cursor_type = "cell"
         table.zebra_stripes = False
@@ -1040,8 +1112,9 @@ class BacklogApp(App):
                 cc = CAT_COLORS.get(f.category, "white")
                 sc = STATUS_COLORS.get(f.status, "white")
                 dirty = " •" if f.dirty else ""
+                marker = AGENT_ROW_MARKERS.get(self._agent_state(f.fid) or "", "")
                 table.add_row(
-                    f.fid, f"{f.name}{dirty}",
+                    f.fid, f"{f.name}{dirty}{marker}",
                     f"[{cc}]{f.category}[/]",
                     f"[{sc}]{f.status}[/]",
                     key=f.fid,
@@ -1075,7 +1148,73 @@ class BacklogApp(App):
     def _update_detail(self):
         feature = self._current_feature()
         detail = self.query_one("#detail-pane", DetailPane)
-        detail.update_content(feature, editing=self.editing, active_tab=self._active_tab)
+        agent_state = self._agent_state(feature.fid) if feature else None
+        capture = self._agent_last_capture.get(feature.fid, "") if feature else ""
+        detail.update_content(feature, editing=self.editing, active_tab=self._active_tab,
+                              agent_state=agent_state, agent_capture=capture)
+
+    # ── Agent sessions (detached tmux, mirrored read-only) ─────────────
+
+    def _session_prefix(self) -> str:
+        project = re.sub(r"[^A-Za-z0-9_-]", "-", self.context_dir.parent.resolve().name or "backlog")
+        return f"impl-{project}-"
+
+    def _session_name(self, fid: str) -> str:
+        return f"{self._session_prefix()}{fid}"
+
+    def _agent_state(self, fid: str) -> str | None:
+        if self._agent_attention.get(fid):
+            return "attention"
+        if fid in self._agent_alive:
+            return "running"
+        if fid in self._agent_done:
+            return "done"
+        return None
+
+    def _poll_agents(self):
+        """Track live agent sessions and their needs-input state (~3s)."""
+        if not TMUX_BIN:
+            return
+        prefix = self._session_prefix()
+        alive: set[str] = set()
+        out = _tmux_out("list-sessions", "-F", "#{session_name}")
+        for line in (out or "").splitlines():
+            if line.startswith(prefix) and re.match(r"^F\d+$", line[len(prefix):]):
+                alive.add(line[len(prefix):])
+
+        ended = self._agent_alive - alive
+        self._agent_done |= ended
+        changed = bool(ended or (alive - self._agent_alive))
+        self._agent_alive = alive
+
+        attention: dict[str, bool] = {}
+        for fid in alive:
+            cap = _tmux_out("capture-pane", "-p", "-t", self._session_name(fid))
+            if cap is not None:
+                self._agent_last_capture[fid] = cap
+            tail = "\n".join((cap or "").rstrip().splitlines()[-12:])
+            attention[fid] = bool(NEEDS_INPUT_RE.search(tail))
+        if attention != self._agent_attention:
+            changed = True
+        self._agent_attention = attention
+
+        if changed:
+            self._refresh_table(preserve_cursor=True)
+            if not self.editing:
+                self._update_detail()
+
+    def _poll_agent_view(self):
+        """Refresh the visible Agent tab with a color capture (~1s)."""
+        if self._active_tab != "agent" or not TMUX_BIN:
+            return
+        feature = self._current_feature()
+        if feature is None or feature.fid not in self._agent_alive:
+            return
+        cap = _tmux_out("capture-pane", "-p", "-e", "-t", self._session_name(feature.fid))
+        if cap is None:
+            return
+        detail = self.query_one("#detail-pane", DetailPane)
+        detail.show_agent_capture(cap)
 
     def _set_status(self, msg: str):
         self.query_one("#status-bar", Static).update(msg)
@@ -1352,6 +1491,17 @@ class BacklogApp(App):
         if not feature:
             return
 
+        # The Agent tab is a live view, not an editor.
+        if target == "agent":
+            if self._agent_state(feature.fid) is None:
+                self._set_status(f"No agent session for {feature.fid} — press \\[i] to start one")
+                return
+            self._active_tab = "agent"
+            self.editing = False
+            self._update_detail()
+            self._set_status(f"Agent view for {feature.fid} — \\[o] open interactive  \\[Esc] back")
+            return
+
         # Create plan/research file if it doesn't exist yet
         if target == "plan" and not feature.has_plan:
             feature.plan_file = feature.plan_filename_for()
@@ -1537,6 +1687,14 @@ class BacklogApp(App):
             self._set_status("No feature selected — move cursor to a feature row.")
             return
 
+        # Already running? Jump to its Agent tab instead of double-launching.
+        if TMUX_BIN and _tmux_out("has-session", "-t", self._session_name(feature.fid)) is not None:
+            self._agent_alive.add(feature.fid)
+            self._active_tab = "agent"
+            self._update_detail()
+            self._set_status(f"Agent already running for {feature.fid} — showing its session")
+            return
+
         plan_filename = feature.plan_file or feature.plan_filename_for()
         plan_exists = (self.context_dir / plan_filename).exists()
         prompt = self._format_prompt("implement" if plan_exists else "implement_no_plan", feature)
@@ -1545,10 +1703,63 @@ class BacklogApp(App):
         # and mark the feature in-progress so backlog.md reflects reality.
         feature.set_status("in-progress")
         self._do_save_all()
+
+        if TMUX_BIN:
+            self._launch_agent_session(feature, prompt)
+        else:
+            self._launch_claude_window(feature, prompt)
         self._refresh_table(preserve_cursor=True)
         self._update_detail()
 
-        self._launch_claude_window(feature, prompt)
+    def _launch_agent_session(self, feature: Feature, prompt: str) -> None:
+        """Start the agent in a detached tmux session and show its Agent tab.
+        The session outlives the TUI — rediscovered on restart by _poll_agents."""
+        name = self._session_name(feature.fid)
+        cwd = str(self.context_dir.parent)
+        shell_cmd = f"exec {shlex.quote(CLAUDE_BIN)} {shlex.quote(prompt)}"
+        try:
+            subprocess.check_output(
+                [TMUX_BIN, "new-session", "-d", "-s", name, "-c", cwd, shell_cmd],
+                text=True,
+                stderr=subprocess.PIPE,
+            )
+        except subprocess.CalledProcessError as e:
+            msg = (e.stderr or "").strip() or str(e)
+            self._set_status(f"tmux new-session failed: {msg}")
+            return
+        except FileNotFoundError:
+            self._set_status("tmux not found on PATH")
+            return
+        self._agent_done.discard(feature.fid)
+        self._agent_last_capture.pop(feature.fid, None)
+        self._agent_alive.add(feature.fid)
+        self._active_tab = "agent"
+        self._set_status(f"⚙ Implementing {feature.fid} — live view here, \\[o] opens interactive")
+
+    def action_open_agent_attach(self) -> None:
+        """From the Agent tab, open the session interactively (to answer
+        permission prompts etc.). Read-only view stays available."""
+        if self.editing or self._active_tab != "agent":
+            return
+        feature = self._current_feature()
+        if feature is None:
+            return
+        name = self._session_name(feature.fid)
+        if feature.fid not in self._agent_alive:
+            self._set_status("Session has ended — nothing to attach to.")
+            return
+        if os.environ.get("TMUX"):
+            subprocess.run([TMUX_BIN, "switch-client", "-t", name], check=False,
+                           stderr=subprocess.DEVNULL)
+        elif sys.platform == "darwin":
+            self._open_macos_terminal_script(
+                f"attach-{feature.fid}",
+                f"exec {shlex.quote(TMUX_BIN)} attach -t {shlex.quote(name)}",
+                str(self.context_dir.parent),
+                f"Opened interactive window for {feature.fid} — detach (Ctrl+B D) to return",
+            )
+        else:
+            self._set_status(f"Attach manually: tmux attach -t {name}")
 
     def _launch_claude_window(self, feature: Feature, prompt: str) -> None:
         """Run claude in a new tmux window (implementation is long-running, so a
@@ -1584,25 +1795,32 @@ class BacklogApp(App):
             self._set_status(f"Claude exited — {feature.fid} implementation session ended")
 
     def _launch_macos_terminal_window(self, feature: Feature, prompt: str, cwd: str) -> None:
-        """Open the agent session in a fresh terminal window via a .command
-        script, leaving the backlog's own tab untouched. The script deletes
-        itself when it runs."""
+        """Open the agent session in a fresh terminal window, leaving the
+        backlog's own tab untouched."""
+        self._open_macos_terminal_script(
+            f"impl-{feature.fid}",
+            f"exec {shlex.quote(CLAUDE_BIN)} {shlex.quote(prompt)}",
+            cwd,
+            f"⚙ Implementing {feature.fid} in a new terminal window — status → in-progress",
+        )
+
+    def _open_macos_terminal_script(self, tag: str, shell_line: str, cwd: str, status_msg: str) -> None:
+        """Run a shell line in a new macOS terminal window via a self-deleting
+        .command script."""
         import tempfile
         script = (
             "#!/bin/zsh\n"
             'rm -f -- "$0"\n'
             f"cd {shlex.quote(cwd)} || exit 1\n"
-            f"exec {shlex.quote(CLAUDE_BIN)} {shlex.quote(prompt)}\n"
+            f"{shell_line}\n"
         )
-        fd, path = tempfile.mkstemp(prefix=f"backlog-impl-{feature.fid}-", suffix=".command")
+        fd, path = tempfile.mkstemp(prefix=f"backlog-{tag}-", suffix=".command")
         with os.fdopen(fd, "w") as fh:
             fh.write(script)
         os.chmod(path, 0o755)
         try:
             subprocess.run(["open", path], check=True, capture_output=True, text=True)
-            self._set_status(
-                f"⚙ Implementing {feature.fid} in a new terminal window — status → in-progress"
-            )
+            self._set_status(status_msg)
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             os.unlink(path)
             msg = getattr(e, "stderr", "") or str(e)
@@ -1621,6 +1839,9 @@ class BacklogApp(App):
 
     def action_stop_edit(self):
         if not self.editing:
+            if self._active_tab == "agent":
+                self._active_tab = "description"
+                self._update_detail()
             return
         self._commit_editor_text()
         self.editing = False

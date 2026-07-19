@@ -87,6 +87,7 @@ It deliberately uses plain markdown in a conventional file layout: tasks and pla
 | d | Delete feature (with confirmation) |
 | c | Toggle Claude pane for current feature + tab |
 | i | Initiate implementation of current feature |
+| o | Open the agent session interactively (from Agent tab) |
 | s | Save all changes |
 | r | Reload from disk |
 | Ctrl+R | Restart process |
@@ -107,7 +108,9 @@ Inside `tmux`, the pane opens as a vertical split next to the TUI. Outside `tmux
 
 Press `i` on a feature row to hand it to an agent for implementation. The tool flushes all unsaved work to disk, sets the feature's status to `in-progress`, and launches a Claude Code session briefed to work through the plan step by step — ticking the plan's checkboxes (`- [ ]` → `- [x]`) as it completes them, and setting the status to `to-review` when done. If no plan exists yet, the brief has the agent write one first.
 
-Inside `tmux` the session opens in a **new window** (named `impl-FXX`); outside tmux on macOS it opens a **new terminal window** — either way the backlog keeps its own tab. Combined with the agent watch below, the backlog becomes a live progress view while the agent works. (On other platforms without tmux, the TUI suspends for the session.)
+The agent runs in a **detached tmux session** (`impl-<project>-FXX`) that survives even a TUI restart. A fourth tab — **Agent** — appears on the feature, mirroring the agent's terminal live (read-only). The feature list shows each row's agent state at a glance: `⚙` working, `✋` waiting for your input (e.g. a permission prompt), `✓` finished. Press `o` in the Agent tab to open the session interactively (answer prompts, type to the agent), and detach (`Ctrl+B D`) to come back. `i` on an already-running feature jumps to its Agent tab instead of relaunching. `Esc` leaves the Agent tab.
+
+Without tmux installed, `i` falls back to opening a plain new terminal window (macOS) or suspending the TUI (other platforms).
 
 ### Agent watch
 
