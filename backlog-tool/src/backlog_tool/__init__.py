@@ -15,8 +15,8 @@ Keys:
   p             Edit plan file          x       Edit research file
   n             New feature             d       Delete feature
   r             Reload from disk        Ctrl+r  Restart process
-  c             Toggle Claude pane
-  q             Quit
+  c             Toggle Claude pane      i       Initiate implementation
+  a             Toggle agent watch      q       Quit
 """
 
 import os
@@ -110,6 +110,20 @@ CLAUDE_PROMPTS = {
     "research_existing": (
         'Continue research on feature {fid} — "{name}". Spec: {ctx}/{spec_filename}. '
         'Existing notes: {ctx}/{research_filename}. Extend or revise as we discuss new angles.'
+    ),
+    "implement": (
+        'Implement feature {fid} — "{name}". Spec: {ctx}/{spec_filename}. '
+        'Plan: {ctx}/{plan_filename}. Work through the plan step by step, ticking its '
+        'checkboxes (- [ ] → - [x]) in the plan file as you complete each step. '
+        'When everything is done and verified, set the {fid} status to to-review '
+        'in {ctx}/backlog.md.'
+    ),
+    "implement_no_plan": (
+        'Implement feature {fid} — "{name}" from its spec: {ctx}/{spec_filename}. '
+        'There is no plan yet: first write a short step-by-step plan with checkboxes '
+        'to {ctx}/{plan_filename}, then implement it, ticking the boxes as you go. '
+        'When everything is done and verified, set the {fid} status to to-review '
+        'in {ctx}/backlog.md.'
     ),
 }
 
@@ -858,6 +872,7 @@ class BacklogApp(App):
         Binding("n", "new_feature", "New"),
         Binding("d", "delete_feature", "Delete"),
         Binding("c", "toggle_claude", "Claude"),
+        Binding("i", "implement", "Implement"),
         Binding("a", "toggle_watch", "Agent watch"),
         Binding("r", "reload", "Reload"),
         # Modifier keys: priority OK — won't conflict with typing
@@ -1417,9 +1432,17 @@ class BacklogApp(App):
 
     # ── Claude pane launcher ──────────────────────────────────────────
 
+    def _format_prompt(self, key: str, feature: Feature) -> str:
+        return CLAUDE_PROMPTS[key].format(
+            fid=feature.fid,
+            name=feature.name,
+            ctx=self.context_dir.name,
+            spec_filename=feature.filename,
+            plan_filename=feature.plan_file or feature.plan_filename_for(),
+            research_filename=feature.research_file or feature.research_filename_for(),
+        )
+
     def _build_claude_prompt(self, feature: Feature) -> str:
-        ctx = self.context_dir.name
-        spec = feature.filename
         plan_filename = feature.plan_file or feature.plan_filename_for()
         research_filename = feature.research_file or feature.research_filename_for()
         # Whether the on-disk file actually exists. has_plan / has_research can be
@@ -1434,14 +1457,7 @@ class BacklogApp(App):
         else:
             key = "description"
 
-        return CLAUDE_PROMPTS[key].format(
-            fid=feature.fid,
-            name=feature.name,
-            ctx=ctx,
-            spec_filename=spec,
-            plan_filename=plan_filename,
-            research_filename=research_filename,
-        )
+        return self._format_prompt(key, feature)
 
     def _tmux_pane_alive(self, pane_id: str) -> bool:
         try:
@@ -1520,6 +1536,60 @@ class BacklogApp(App):
             # Stale id (user exited Claude themselves) — clear it before re-opening.
             self._claude_pane_id = None
             self._open_claude_pane(feature)
+
+    # ── Initiate implementation ───────────────────────────────────────
+
+    def action_implement(self) -> None:
+        """Launch an agent session that implements the selected feature."""
+        if self.editing:
+            return
+        feature = self._current_feature()
+        if feature is None:
+            self._set_status("No feature selected — move cursor to a feature row.")
+            return
+
+        plan_filename = feature.plan_file or feature.plan_filename_for()
+        plan_exists = (self.context_dir / plan_filename).exists()
+        prompt = self._format_prompt("implement" if plan_exists else "implement_no_plan", feature)
+
+        # Flush everything to disk first — the agent reads files, not our memory —
+        # and mark the feature in-progress so backlog.md reflects reality.
+        feature.set_status("in-progress")
+        self._do_save_all()
+        self._refresh_table(preserve_cursor=True)
+        self._update_detail()
+
+        self._launch_claude_window(feature, prompt)
+
+    def _launch_claude_window(self, feature: Feature, prompt: str) -> None:
+        """Run claude in a new tmux window (implementation is long-running, so a
+        split would crowd out the backlog), or full-screen without tmux."""
+        cwd = str(self.context_dir.parent)
+        if os.environ.get("TMUX"):
+            shell_cmd = f"exec {shlex.quote(CLAUDE_BIN)} {shlex.quote(prompt)}"
+            window_name = f"impl-{feature.fid}"
+            try:
+                subprocess.check_output(
+                    ["tmux", "new-window", "-c", cwd, "-n", window_name, shell_cmd],
+                    text=True,
+                    stderr=subprocess.PIPE,
+                )
+                self._set_status(
+                    f"⚙ Implementing {feature.fid} in tmux window “{window_name}” — status → in-progress"
+                )
+            except subprocess.CalledProcessError as e:
+                msg = (e.stderr or "").strip() or str(e)
+                self._set_status(f"tmux new-window failed: {msg}")
+            except FileNotFoundError:
+                self._set_status("tmux not found on PATH")
+        else:
+            try:
+                with self.suspend():
+                    subprocess.run([CLAUDE_BIN, prompt], cwd=cwd)
+            except FileNotFoundError:
+                self._set_status(f"claude not found on PATH (tried {CLAUDE_BIN})")
+                return
+            self._set_status(f"Claude exited — {feature.fid} implementation session ended")
 
     # ── Actions ────────────────────────────────────────────────────────
 

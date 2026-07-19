@@ -86,6 +86,7 @@ It deliberately uses plain markdown in a conventional file layout: tasks and pla
 | n | New feature |
 | d | Delete feature (with confirmation) |
 | c | Toggle Claude pane for current feature + tab |
+| i | Initiate implementation of current feature |
 | a | Toggle agent watch (on by default) |
 | s | Save all changes |
 | r | Reload from disk |
@@ -102,6 +103,12 @@ Press `c` on a feature row to launch an interactive Claude Code session briefed 
 - **Research tab** — Claude investigates and writes findings to `FXX-…-research.md`.
 
 Inside `tmux`, the pane opens as a vertical split next to the TUI. Outside `tmux`, the TUI suspends and Claude takes the full terminal until you exit. Press `c` again to close the pane; switching tabs while a pane is open will prompt to close and respawn with the new brief.
+
+### Initiate implementation
+
+Press `i` on a feature row to hand it to an agent for implementation. The tool flushes all unsaved work to disk, sets the feature's status to `in-progress`, and launches a Claude Code session briefed to work through the plan step by step — ticking the plan's checkboxes (`- [ ]` → `- [x]`) as it completes them, and setting the status to `to-review` when done. If no plan exists yet, the brief has the agent write one first.
+
+Inside `tmux` the session opens in a **new window** (named `impl-FXX`) so the backlog stays on screen; without tmux the TUI suspends. Combined with the agent watch below, the backlog becomes a live progress view while the agent works.
 
 ### Agent watch
 
