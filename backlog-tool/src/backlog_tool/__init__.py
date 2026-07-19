@@ -858,6 +858,7 @@ class BacklogApp(App):
         Binding("n", "new_feature", "New"),
         Binding("d", "delete_feature", "Delete"),
         Binding("c", "toggle_claude", "Claude"),
+        Binding("a", "toggle_watch", "Agent watch"),
         Binding("r", "reload", "Reload"),
         # Modifier keys: priority OK — won't conflict with typing
         Binding("ctrl+s", "save", "Save", priority=True, show=False),
@@ -889,11 +890,14 @@ class BacklogApp(App):
         self._update_available: bool = False
         self._ratio_idx: int = self.DEFAULT_RATIO_IDX
         self._claude_pane_id: str | None = None
+        self._watch_enabled: bool = True
+        self._fs_pending: bool = False  # disk changed while local edits were unsaved
         # Title shows the project folder (parent of context dir) so multiple
         # backlogs on screen are distinguishable.
         project_name = context_dir.parent.resolve().name or "Backlog"
         self.title = f"{project_name} — Backlog"
         self._load_features()
+        self._fs_snapshot: dict[str, float] = self._scan_context_mtimes()
 
     def _load_features(self):
         self.features = []
@@ -986,6 +990,7 @@ class BacklogApp(App):
 
     def on_mount(self):
         self.set_interval(3.0, self._check_for_update)
+        self.set_interval(2.0, self._check_fs_changes)
         table = self.query_one("#feature-table", DataTable)
         table.cursor_type = "cell"
         table.zebra_stripes = False
@@ -1069,6 +1074,68 @@ class BacklogApp(App):
             bar = self.query_one("#update-bar", Static)
             bar.update("  ↻  New version available — press Ctrl+R to restart  ")
             bar.add_class("visible")
+
+    # ── Agent watch: auto-reload when files change on disk ─────────────
+
+    def _scan_context_mtimes(self) -> dict[str, float]:
+        try:
+            return {
+                f.name: f.stat().st_mtime
+                for f in self.context_dir.iterdir()
+                if f.suffix == ".md"
+            }
+        except OSError:
+            return getattr(self, "_fs_snapshot", {})
+
+    def _check_fs_changes(self):
+        """Reload when an agent (or anything else) edits the context files.
+        Never clobbers local unsaved work — hints to reload instead."""
+        if not self._watch_enabled:
+            return
+        snap = self._scan_context_mtimes()
+        if snap == self._fs_snapshot:
+            return
+        if len(self.screen_stack) > 1:
+            return  # modal open — try again next tick
+        self._fs_snapshot = snap
+        if self.editing or self._unsaved_count() > 0:
+            if not self._fs_pending:
+                self._fs_pending = True
+                bar = self.query_one("#update-bar", Static)
+                bar.update("  ✎  Files changed on disk — press \\[r] to reload  ")
+                bar.add_class("visible")
+            return
+        self._auto_reload()
+
+    def _auto_reload(self):
+        """Reload from disk, keeping cursor position and active tab."""
+        feature = self._current_feature()
+        keep_fid = feature.fid if feature else None
+        keep_tab = self._active_tab
+        table = self.query_one("#feature-table", DataTable)
+        keep_col = table.cursor_column
+        self._load_features()
+        self._refresh_table()
+        row = next((i for i, e in enumerate(self.display_rows)
+                    if e is not None and e.fid == keep_fid), None)
+        if row is None:
+            row = 1 if len(self.display_rows) > 1 else 0
+            self._active_tab = "description"
+        else:
+            self._active_tab = keep_tab
+        table.move_cursor(row=row, column=keep_col)
+        self._update_detail()
+        self._set_status("↻ Reloaded — files changed on disk")
+
+    def action_toggle_watch(self):
+        if self.editing:
+            return
+        self._watch_enabled = not self._watch_enabled
+        if self._watch_enabled:
+            self._fs_snapshot = self._scan_context_mtimes()
+            self._set_status("Agent watch ON — auto-reloads when files change on disk")
+        else:
+            self._set_status("Agent watch OFF — press \\[a] to re-enable")
 
     # ── Editor change detection ─────────────────────────────────────────
 
@@ -1344,6 +1411,8 @@ class BacklogApp(App):
                 docs_saved += 1
         save_backlog_index(self.context_dir, self.features)
         self._order_dirty = False
+        # Our own writes must not look like external changes to the agent watch.
+        self._fs_snapshot = self._scan_context_mtimes()
         return saved, docs_saved
 
     # ── Claude pane launcher ──────────────────────────────────────────
@@ -1504,6 +1573,10 @@ class BacklogApp(App):
     def _do_reload(self, discard_count: int = 0):
         self._reload_confirmed = False
         self._order_dirty = False
+        self._fs_pending = False
+        self._fs_snapshot = self._scan_context_mtimes()
+        if not self._update_available:
+            self.query_one("#update-bar", Static).remove_class("visible")
         if self.editing:
             self.editing = False
         self._active_tab = "description"
