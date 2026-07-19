@@ -1552,7 +1552,8 @@ class BacklogApp(App):
 
     def _launch_claude_window(self, feature: Feature, prompt: str) -> None:
         """Run claude in a new tmux window (implementation is long-running, so a
-        split would crowd out the backlog), or full-screen without tmux."""
+        split would crowd out the backlog). Outside tmux, open a new terminal
+        window on macOS — never take over the tab the backlog is running in."""
         cwd = str(self.context_dir.parent)
         if os.environ.get("TMUX"):
             shell_cmd = f"exec {shlex.quote(CLAUDE_BIN)} {shlex.quote(prompt)}"
@@ -1571,6 +1572,8 @@ class BacklogApp(App):
                 self._set_status(f"tmux new-window failed: {msg}")
             except FileNotFoundError:
                 self._set_status("tmux not found on PATH")
+        elif sys.platform == "darwin":
+            self._launch_macos_terminal_window(feature, prompt, cwd)
         else:
             try:
                 with self.suspend():
@@ -1579,6 +1582,31 @@ class BacklogApp(App):
                 self._set_status(f"claude not found on PATH (tried {CLAUDE_BIN})")
                 return
             self._set_status(f"Claude exited — {feature.fid} implementation session ended")
+
+    def _launch_macos_terminal_window(self, feature: Feature, prompt: str, cwd: str) -> None:
+        """Open the agent session in a fresh terminal window via a .command
+        script, leaving the backlog's own tab untouched. The script deletes
+        itself when it runs."""
+        import tempfile
+        script = (
+            "#!/bin/zsh\n"
+            'rm -f -- "$0"\n'
+            f"cd {shlex.quote(cwd)} || exit 1\n"
+            f"exec {shlex.quote(CLAUDE_BIN)} {shlex.quote(prompt)}\n"
+        )
+        fd, path = tempfile.mkstemp(prefix=f"backlog-impl-{feature.fid}-", suffix=".command")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(script)
+        os.chmod(path, 0o755)
+        try:
+            subprocess.run(["open", path], check=True, capture_output=True, text=True)
+            self._set_status(
+                f"⚙ Implementing {feature.fid} in a new terminal window — status → in-progress"
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            os.unlink(path)
+            msg = getattr(e, "stderr", "") or str(e)
+            self._set_status(f"Could not open a terminal window: {msg.strip()}")
 
     # ── Actions ────────────────────────────────────────────────────────
 
