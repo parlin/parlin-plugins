@@ -579,7 +579,7 @@ class TabBar(Static, can_focus=True):
     }
     """
 
-    TAB_IDS = ["description", "plan", "research"]
+    TAB_IDS = ["description", "research", "plan"]
 
     def __init__(self, **kwargs):
         super().__init__("", **kwargs)
