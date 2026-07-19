@@ -979,9 +979,11 @@ class BacklogApp(App):
         self._agent_done: set[str] = set()           # sessions that ended this run
         self._agent_last_capture: dict[str, str] = {}
         # Title shows the project folder (parent of context dir) so multiple
-        # backlogs on screen are distinguishable.
+        # backlogs on screen are distinguishable; sub-title puts the tool
+        # version in the header row.
         project_name = context_dir.parent.resolve().name or "Backlog"
         self.title = f"{project_name} — Backlog"
+        self.sub_title = f"v{get_version()}"
         self._load_features()
         self._fs_snapshot: dict[str, float] = self._scan_context_mtimes()
 
