@@ -74,11 +74,29 @@ If the user wants to interactively manage the backlog, first ensure the
 `backlog` command is installed, then launch it:
 
 ```bash
-# Check if installed; if not, install from this plugin's directory
-which backlog || pip install ${CLAUDE_PLUGIN_DIR} --break-system-packages
+# Install if missing, or upgrade if the PATH binary is older than this plugin.
+# A plain `which backlog` check is NOT enough: it short-circuits forever once any
+# binary exists, so plugin auto-updates would never reach the command you run.
+PLUGIN_VER=$(python3 -c "import json,os;print(json.load(open(os.environ['CLAUDE_PLUGIN_DIR']+'/.claude-plugin/plugin.json'))['version'])")
+CUR_VER=$(backlog --version 2>/dev/null || echo none)
+
+if [ "$CUR_VER" != "$PLUGIN_VER" ]; then
+  echo "backlog: $CUR_VER -> $PLUGIN_VER"
+  if command -v pipx >/dev/null 2>&1; then
+    pipx install --force --backend pip "${CLAUDE_PLUGIN_DIR}"
+  else
+    pip install --upgrade "${CLAUDE_PLUGIN_DIR}" --break-system-packages
+  fi
+fi
+
 # Then launch
 backlog
 ```
+
+Prefer `pipx` when present — it isolates the tool instead of writing into system
+Python. `--backend pip` sidesteps pipx's `uv` version requirement. Versions older
+than 1.2.0 have no `--version` flag, so `CUR_VER` reads `none` and they upgrade
+correctly on first run.
 
 If the project uses a standalone `backlog-tool.py` script instead:
 ```bash

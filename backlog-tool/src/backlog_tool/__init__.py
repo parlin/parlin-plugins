@@ -1692,7 +1692,22 @@ def do_init(context_dir: Path):
 
 # ── Entry point ────────────────────────────────────────────────────────
 
+def get_version() -> str:
+    """Installed version. The backlog skill compares this against the plugin
+    manifest to decide whether the PATH binary is stale — keep it printable
+    as a bare version string on stdout."""
+    try:
+        from importlib.metadata import version
+        return version("backlog-tool")
+    except Exception:
+        return "unknown"
+
+
 def main():
+    if "--version" in sys.argv or "-V" in sys.argv:
+        print(get_version())
+        return
+
     if "--init" in sys.argv:
         # backlog --init [context-dir]
         args = [a for a in sys.argv[1:] if a != "--init"]
@@ -1705,6 +1720,7 @@ def main():
         print("Usage:")
         print("  backlog [context-dir]    Run the TUI (default: ./context)")
         print("  backlog --init [dir]     Scaffold a new backlog in dir")
+        print("  backlog --version        Print the installed version")
         print("  backlog --help           Show this help")
         return
 
