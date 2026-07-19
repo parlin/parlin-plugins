@@ -16,7 +16,10 @@ Keys:
   n             New feature             d       Delete feature
   r             Reload from disk        Ctrl+r  Restart process
   c             Toggle Claude pane      i       Initiate implementation
-  a             Toggle agent watch      q       Quit
+  q             Quit
+
+Files changed on disk (e.g. by an agent) reload automatically; unsaved
+local edits are never clobbered — a banner offers \\[r] instead.
 """
 
 import os
@@ -873,7 +876,6 @@ class BacklogApp(App):
         Binding("d", "delete_feature", "Delete"),
         Binding("c", "toggle_claude", "Claude"),
         Binding("i", "implement", "Implement"),
-        Binding("a", "toggle_watch", "Agent watch"),
         Binding("r", "reload", "Reload"),
         # Modifier keys: priority OK — won't conflict with typing
         Binding("ctrl+s", "save", "Save", priority=True, show=False),
@@ -905,7 +907,6 @@ class BacklogApp(App):
         self._update_available: bool = False
         self._ratio_idx: int = self.DEFAULT_RATIO_IDX
         self._claude_pane_id: str | None = None
-        self._watch_enabled: bool = True
         self._fs_pending: bool = False  # disk changed while local edits were unsaved
         # Title shows the project folder (parent of context dir) so multiple
         # backlogs on screen are distinguishable.
@@ -1105,8 +1106,6 @@ class BacklogApp(App):
     def _check_fs_changes(self):
         """Reload when an agent (or anything else) edits the context files.
         Never clobbers local unsaved work — hints to reload instead."""
-        if not self._watch_enabled:
-            return
         snap = self._scan_context_mtimes()
         if snap == self._fs_snapshot:
             return
@@ -1141,16 +1140,6 @@ class BacklogApp(App):
         table.move_cursor(row=row, column=keep_col)
         self._update_detail()
         self._set_status("↻ Reloaded — files changed on disk")
-
-    def action_toggle_watch(self):
-        if self.editing:
-            return
-        self._watch_enabled = not self._watch_enabled
-        if self._watch_enabled:
-            self._fs_snapshot = self._scan_context_mtimes()
-            self._set_status("Agent watch ON — auto-reloads when files change on disk")
-        else:
-            self._set_status("Agent watch OFF — press \\[a] to re-enable")
 
     # ── Editor change detection ─────────────────────────────────────────
 

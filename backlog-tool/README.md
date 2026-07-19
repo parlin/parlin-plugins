@@ -87,7 +87,6 @@ It deliberately uses plain markdown in a conventional file layout: tasks and pla
 | d | Delete feature (with confirmation) |
 | c | Toggle Claude pane for current feature + tab |
 | i | Initiate implementation of current feature |
-| a | Toggle agent watch (on by default) |
 | s | Save all changes |
 | r | Reload from disk |
 | Ctrl+R | Restart process |
@@ -112,4 +111,4 @@ Inside `tmux` the session opens in a **new window** (named `impl-FXX`) so the ba
 
 ### Agent watch
 
-The TUI watches the context directory (2s poll) and auto-reloads when files change on disk — so when Claude (or any agent, or another editor) writes to a spec, plan, or research file, you see it immediately. Your unsaved local edits are never clobbered: if disk changes arrive while you have unsaved work, a banner appears instead and `r` reloads when you're ready. Press `a` to toggle the watch.
+The TUI always watches the context directory (2s poll) and auto-reloads when files change on disk — so when Claude (or any agent, or another editor) writes to a spec, plan, or research file, you see it immediately. Your unsaved local edits are never clobbered: if disk changes arrive while you're typing or have unsaved work, a banner appears instead and `r` reloads when you're ready.
