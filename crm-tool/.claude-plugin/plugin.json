@@ -1,0 +1,9 @@
+{
+  "name": "crm-tool",
+  "description": "Lightweight document-based CRM in plain markdown — relationship tracks, a two-entry pipeline, outreach campaigns, and permanent opt-out handling, driven by a Claude skill",
+  "version": "1.0.0",
+  "author": {
+    "name": "Par Lindhe"
+  },
+  "license": "MIT"
+}
