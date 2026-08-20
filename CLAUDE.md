@@ -15,7 +15,7 @@ plans in `context/` (gitignored).
 
 Plugins: `backlog-tool` (Textual TUI + skill), `apple-dev` (build-to-phone,
 testflight), `deployed-artifacts` (list live deploys), `crm-tool` (markdown CRM -
-skill + templates, no code).
+skill + templates, no code), `render-doc` (Markdown to A4 PDF via headless Chrome).
 
 A skill's frontmatter `description` is what makes Claude trigger it - write it as
 "use when the user…" phrasing, not as a summary.
@@ -40,9 +40,9 @@ project, so they can stay in the terminal instead of switching to another app.
   `backlog-tool/pyproject.toml`, `backlog-tool/.claude-plugin/plugin.json`, and the
   `backlog-tool` entry in `.claude-plugin/marketplace.json`. These drifted once
   already (pyproject shipped 1.1.1 while both manifests still said 1.0.0).
-- **crm-tool's version lives in TWO places** - `crm-tool/.claude-plugin/plugin.json`
-  and the `crm-tool` entry in `.claude-plugin/marketplace.json`. (Two, not three
-  like backlog-tool: crm-tool has no pyproject.toml.)
+- **crm-tool's and render-doc's versions live in TWO places each** - `crm-tool/.claude-plugin/plugin.json`
+  and the matching entry in `.claude-plugin/marketplace.json`. (Two, not three like
+  backlog-tool: neither plugin has a pyproject.toml.)
 - `context/` is gitignored repo-wide - that's where private plans/notes go. It is
   also the dir the backlog skill scaffolds, so don't run `backlog --init` here and
   expect tracked output.

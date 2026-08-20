@@ -45,6 +45,16 @@
       },
       "source": "./deployed-artifacts",
       "category": "productivity"
+    },
+    {
+      "name": "render-doc",
+      "description": "Render any Markdown file to a print-quality A4 PDF - no dependencies beyond Python 3 and Chrome, and a private-notes section that never reaches the PDF",
+      "version": "1.0.0",
+      "author": {
+        "name": "Par Lindhe"
+      },
+      "source": "./render-doc",
+      "category": "productivity"
     }
   ]
 }
