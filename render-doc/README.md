@@ -26,7 +26,7 @@ and your own working notes on it, with no risk of the notes travelling along.
 
 ## Interna anteckningar
 
-Margin is thin, do not go below 900/h. Never rendered.
+Client pushed back on scope last time - keep the delivery boundary explicit. Never rendered.
 ```
 
 ## Supported Markdown
