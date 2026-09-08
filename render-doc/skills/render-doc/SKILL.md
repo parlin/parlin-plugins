@@ -12,8 +12,16 @@ requirements are Python 3 and Google Chrome, and the script drives Chrome headle
 ## Run it
 
 ```bash
-python3 "${CLAUDE_PLUGIN_DIR}/skills/render-doc/render-doc.py" <file.md> [out.pdf]
+python3 "${CLAUDE_PLUGIN_DIR}/skills/render-doc/render-doc.py" <file.md> [out.pdf] [--sans] [--logo <image>] [--logo-align left|right] [--draft [TEXT]]
 ```
+
+- `--sans` sets the body in Inter (Google Fonts, falls back to Helvetica Neue offline)
+  instead of the default serif. Use it when the project or document asks for a sans serif.
+- `--draft` lays a faint diagonal "Utkast" across every page; `--draft "Draft"` uses
+  another word. For versions that circulate before the document is final.
+- `--logo <image>` places the image on the first page above the title, top right by
+  default or top left with `--logo-align left`. SVG or PNG; the file is embedded in the PDF. Use it for letterhead-style documents such as
+  offers and invoices, where the project says where its logo lives.
 
 Without an output path the PDF is written next to the source with the same stem. Give an
 explicit output path when the recipient-facing filename should differ from the working
@@ -25,8 +33,10 @@ while the thing you send should be named for what it is.
 Headings (4 levels), paragraphs, bold, italic, inline code, links, ordered and unordered
 lists, tables, fenced code blocks, blockquotes, horizontal rules.
 
-Two behaviours worth knowing:
+Three behaviours worth knowing:
 
+- A line holding only `\newpage` starts a new page (the pandoc convention). Use it for
+  an appendix or a signature page that should not share a page with the body.
 - A table whose first row is empty renders without a header row. That is the borderless
   key/value layout used for document front matter.
 - A blockquote containing a run of underscores keeps its line breaks, because it is a

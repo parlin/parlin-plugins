@@ -2,7 +2,12 @@
 """
 Render a Markdown document to a print-quality A4 PDF.
 
-    python3 render-doc.py kompendium.md [ut.pdf]
+    python3 render-doc.py kompendium.md [ut.pdf] [--sans] [--logo path]
+
+--sans sets the body in a sans serif (Inter, falling back to Helvetica Neue) instead
+of the default serif. --logo places an image on the first page above the title, top
+right unless --logo-align left; SVG and PNG both work and the file is embedded, so
+the PDF has no external references.
 
 Generic counterpart to consultant-profiles/render-cv.py, which only understands
 the CV structure. This one takes ordinary Markdown - headings, paragraphs, lists,
@@ -13,12 +18,17 @@ cannot drift apart.
 
 Everything from a "## Interna anteckningar" heading onward is dropped, as are
 HTML comments - neither belongs in a document that goes to a client.
+
+A line holding only \newpage (the pandoc convention) starts a new page. --draft puts a
+faint diagonal "Utkast" (or the text given) across every page.
 """
 
+import argparse
+import base64
 import html
+import mimetypes
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -40,6 +50,9 @@ CSS = """
     color: var(--ink); line-height: 1.25; margin: 0;
   }
   h1 { font-size: 19pt; letter-spacing: -0.2pt; margin-bottom: 4mm; }
+  .doc-logo { display: flex; justify-content: flex-end; margin: 0 0 8mm; }
+  .doc-logo.left { justify-content: flex-start; }
+  .doc-logo img { height: 11mm; width: auto; }
   h2 {
     font-size: 12.5pt; margin: 9mm 0 3mm; padding-bottom: 1.6mm;
     border-bottom: 1.2px solid var(--rule); break-after: avoid;
@@ -55,6 +68,13 @@ CSS = """
   a { color: var(--accent); text-decoration: none; }
   strong { color: var(--ink); }
   hr { border: 0; border-top: 1px solid var(--rule); margin: 6mm 0; }
+  .pagebreak { break-before: page; }
+  .draft {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-40deg);
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 96pt;
+    font-weight: 700; letter-spacing: 6pt; text-transform: uppercase;
+    color: rgba(0, 0, 0, 0.07); white-space: nowrap; pointer-events: none; z-index: -1;
+  }
   blockquote {
     margin: 0 0 3mm; padding: 2mm 0 2mm 4mm;
     border-left: 2px solid var(--accent); color: var(--muted);
@@ -183,6 +203,11 @@ def to_html(md):
             i += 1
             continue
 
+        if line.strip() == "\\newpage":
+            out.append('<div class="pagebreak"></div>')
+            i += 1
+            continue
+
         if line.lstrip().startswith(">"):
             buf = []
             while i < len(lines) and lines[i].lstrip().startswith(">"):
@@ -233,17 +258,50 @@ def to_html(md):
     return "\n".join(out)
 
 
+SANS_CSS = """
+  body { font-family: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  h1, h2, h3, h4, th { font-family: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+"""
+SANS_LINK = (
+    '<link rel="preconnect" href="https://fonts.googleapis.com">'
+    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"'
+    ' rel="stylesheet">'
+)
+
+
+def logo_tag(path: Path, align: str) -> str:
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f'<div class="doc-logo {align}"><img src="data:{mime};base64,{data}" alt=""></div>'
+
+
 def main():
-    if len(sys.argv) < 2:
-        sys.exit(__doc__.strip())
-    src = Path(sys.argv[1])
-    out = Path(sys.argv[2]) if len(sys.argv) > 2 else src.with_suffix(".pdf")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("src", type=Path)
+    ap.add_argument("out", type=Path, nargs="?")
+    ap.add_argument("--sans", action="store_true", help="body text in a sans serif (Inter)")
+    ap.add_argument("--logo", type=Path, help="image placed above the title")
+    ap.add_argument("--logo-align", choices=["left", "right"], default="right",
+                    help="which side the logo sits on (default right)")
+    ap.add_argument("--draft", nargs="?", const="Utkast", metavar="TEXT",
+                    help="diagonal watermark on every page (default text: Utkast)")
+    args = ap.parse_args()
+    src = args.src
+    out = args.out or src.with_suffix(".pdf")
+    if args.logo and not args.logo.is_file():
+        ap.error(f"logo not found: {args.logo}")
 
     body = to_html(src.read_text())
+    if args.logo:
+        body = logo_tag(args.logo, args.logo_align) + body
+    if args.draft:
+        body = f'<div class="draft">{html.escape(args.draft)}</div>' + body
+    css = CSS + (SANS_CSS if args.sans else "")
+    head_extra = SANS_LINK if args.sans else ""
     title = html.escape(src.stem)
     page = (
         f"<!doctype html><html><head><meta charset='utf-8'><title>{title}</title>"
-        f"<style>{CSS}</style></head><body>{body}</body></html>"
+        f"{head_extra}<style>{css}</style></head><body>{body}</body></html>"
     )
     tmp = src.with_suffix(".print.html")
     tmp.write_text(page)
