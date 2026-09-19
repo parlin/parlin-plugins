@@ -11,7 +11,11 @@ plans in `context/` (gitignored).
     .claude-plugin/marketplace.json     # marketplace manifest - lists all plugins
     <plugin>/.claude-plugin/plugin.json # per-plugin manifest
     <plugin>/skills/<skill>/SKILL.md    # the actual behavior
-    backlog-tool/src/backlog_tool/      # only plugin with real code (Python/Textual TUI)
+    backlog-tool/src/backlog_tool/      # only plugin with real code (Python)
+        model.py                        #   parsing + writing, no Textual import
+        cli.py                          #   non-interactive commands + entry point
+        tui.py                          #   the Textual app
+    backlog-tool/tests/                 # stdlib unittest, no dependencies
 
 Plugins: `backlog-tool` (Textual TUI + skill), `apple-dev` (build-to-phone,
 testflight), `deployed-artifacts` (list live deploys), `crm-tool` (markdown CRM -
@@ -31,6 +35,10 @@ project, so they can stay in the terminal instead of switching to another app.
   files with intuitive names. This is deliberate: the structure is already familiar
   to AI agents, so the files *are* the integration surface - no API needed. Keep
   backlogs greppable, diffable, and versioned next to the code.
+- **Two front ends, one data layer.** The TUI is for the human; the subcommands
+  (`list`/`show`/`set`/`add`/`next-id`/`check`) are for agents and scripts. Both write through
+  `model.py`, so neither can invent its own file format. Add behavior to the model, not to one
+  front end.
 - **Arrow keys or mouse.** Both navigation modes are supported; don't regress either.
 - **Shortcuts for everything** - keyboard-first, documented in the plugin README.
 
@@ -47,7 +55,14 @@ project, so they can stay in the terminal instead of switching to another app.
   also the dir the backlog skill scaffolds, so don't run `backlog --init` here and
   expect tracked output.
 - Author name is `Par Lindhe` in all manifests. Keep new plugins consistent.
-- No tests, no linter, no CI. Verification is manual - run the tool and look.
+- **backlog-tool has tests; the other plugins do not.** Run them before shipping a change to
+  it: `cd backlog-tool && python3 -m unittest discover -s tests -t .` (stdlib unittest, no
+  dependencies; the TUI cases skip themselves when Textual is missing). No linter, no CI -
+  everything else is still verified by running it and looking.
+- **`backlog list` must never import Textual.** That is the point of the model/cli/tui split,
+  and `tests/test_backlog.py::ImportLaziness` fails if a stray top-level import breaks it.
+  Note the entry point is `backlog_tool.cli:main`, so `__init__.py` has to stay thin too -
+  importing a submodule imports its parent package.
 
 ## backlog-tool dev loop
 

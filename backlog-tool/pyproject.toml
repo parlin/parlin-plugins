@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "backlog-tool"
-version = "1.6.0"
+version = "1.7.0"
 description = "Terminal TUI for managing feature backlogs with markdown files"
 requires-python = ">=3.10"
 dependencies = [
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-backlog = "backlog_tool:main"
+backlog = "backlog_tool.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

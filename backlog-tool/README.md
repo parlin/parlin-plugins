@@ -37,6 +37,27 @@ backlog --help           # all commands
 
 Press `n` to add a feature, `e` to edit its description, `s` to save, `q` to quit. Full key list below.
 
+**4. Or drive it without the UI:**
+
+```bash
+backlog list                      # every feature except shipped/parked, one line each
+backlog list -c now,next          # filter by category
+backlog list -s ready,to-review   # filter by status
+backlog list --json               # machine-readable
+backlog show F12                  # header + description
+backlog show F12 --plan           # and its plan file
+backlog set F12 -s shipped        # updates the table row and the feature header together
+backlog add "New thing" -c next -s ready -b "One line of description."
+backlog next-id                   # lowest free FXX
+backlog check                     # report drift between the table and the feature files
+```
+
+These print one padded line per feature and never open a UI, which is what makes them
+cheap for an AI agent to call: answering "what is F12's status" costs a few tokens instead
+of a read of the whole table. `backlog set` is the one to reach for when changing state - it
+writes both files, so the table and the feature header cannot drift apart. Add `-d <dir>` to
+point any command at a backlog other than `./context`.
+
 ### Where your tasks and plans are stored
 
 Everything lives in one plain-markdown directory — `context/` by default, in the project root:
@@ -117,3 +138,19 @@ Without tmux installed, `i` falls back to opening a plain new terminal window (m
 ### Agent watch
 
 The TUI always watches the context directory (2s poll) and auto-reloads when files change on disk — so when Claude (or any agent, or another editor) writes to a spec, plan, or research file, you see it immediately. Your unsaved local edits are never clobbered: if disk changes arrive while you're typing or have unsaved work, a banner appears instead and `r` reloads when you're ready.
+
+## Development
+
+The package is split so a query never pays for the UI:
+
+    src/backlog_tool/model.py   parsing and writing (no Textual import)
+    src/backlog_tool/cli.py     non-interactive commands, dispatch, entry point
+    src/backlog_tool/tui.py     the Textual app
+
+Tests are stdlib `unittest` and need no dependencies beyond Python:
+
+    cd backlog-tool && python3 -m unittest discover -s tests -t .
+
+After editing the source, reinstall before the `backlog` on your PATH changes:
+
+    pipx install --force --backend pip ./backlog-tool

@@ -7,111 +7,79 @@ description: >
 allowed-tools: Read, Grep, Edit, Write, Bash, Glob
 ---
 
-# Backlog Tool — Claude Code Skill
+# Backlog Tool
 
-You are helping manage a **feature backlog** stored as markdown files in a `context/` directory.
+A feature backlog stored as markdown in a project's `context/` directory:
 
-## Architecture
+- **`context/backlog.md`** owns **ordering, status and category** (one table row per feature).
+- **`context/FXX-slug.md`** owns the **name and description**. Optional siblings:
+  `FXX-slug-plan.md`, `FXX-slug-research.md`.
 
-The backlog system has two parts:
+Both files carry status and category, so **every change writes both**. Use `backlog set`,
+which does that in one step - hand-editing two files is where they drift apart.
 
-1. **`context/backlog.md`** — The **single source of truth** for feature ordering, status, and category. Contains a markdown table listing all features.
-2. **`context/FXX-slug.md`** — Individual feature files containing descriptions, notes, and details.
+## Use the commands, not full-file reads
 
-Optional per-feature files:
-- `FXX-slug-plan.md` — Implementation plan
-- `FXX-slug-research.md` — Research notes
+The `backlog` command answers questions compactly. A backlog can hold 170+ features, so
+**never `cat` the whole table, and never read a whole feature file** to check a status.
 
-## Source of Truth Rules
+```bash
+backlog list                      # all but shipped/parked, one line each
+backlog list -c now,next          # by category
+backlog list -s ready,to-review   # by status (an explicit --status shows shipped too)
+backlog list --json               # for scripting
+backlog show F145                 # header + description
+backlog show F145 --head          # header only
+backlog show F145 --plan          # add the plan file (these get large - ask for them)
+backlog set F145 -s shipped       # updates the table row AND the feature header
+backlog set F145 -c now -s ready
+backlog add "Name" -c next -s ready -b "One-line description."
+backlog next-id                   # lowest free FXX
+backlog check                     # report drift between table and feature files
+```
 
-- **`backlog.md` owns**: ordering (row position), status, and category
-- **Feature files own**: name, description body, plan, research
-- When updating status or category, **always update `backlog.md`** (the table row)
-- Feature files also contain status/category headers for human readability — update both when changing
+Every command takes `-d <dir>` for a backlog outside `./context`. Run from the project root.
 
-## Statuses (in order)
+If `backlog` is missing or a different version than the plugin:
 
-`idea` → `research-needed` → `researching` → `research-done` → `ready` → `in-progress` → `to-review` → `shipped` → `parked`
+```bash
+bash "${CLAUDE_PLUGIN_DIR}/scripts/ensure-installed.sh"
+```
 
-## Categories
+Only if the command is genuinely unavailable, fall back to `grep` on the rows you need
+(`grep -n '^| F68' context/backlog.md`) - still not a full read.
 
-- `now` — Shipped or actively being worked on
-- `next` — Up next, research done or low-hanging fruit
-- `later` — Planned but not yet prioritized
-- `maybe` — Ideas worth capturing, not committed
+## Keep feature files lean
 
-## Feature File Format
+The detail files are what make a backlog expensive to read. Keep each `FXX-slug.md` to
+scope and decisions; move long research into `FXX-slug-research.md` and step-by-step plans
+into `FXX-slug-plan.md`. When reading a file over ~200 lines, grep for the section you need
+or read an offset - not the whole thing.
+
+## Statuses and categories
+
+`idea` → `research-needed` → `researching` → `research-done` → `ready` → `in-progress`
+→ `to-review` → `shipped`, plus `parked`.
+
+`now` (shipped or in flight) · `next` (up next) · `later` (planned) · `maybe` (uncommitted).
+
+## Feature file format
 
 ```markdown
 # FXX: Feature Name
 
-**Status:** status-here
-**Category:** category-here
+**Status:** ready
+**Category:** next
 
 ## Description
-Feature description body...
+What it does and why it matters.
 ```
 
-## Common Operations
+## Other operations
 
-### Query the backlog
-Read `context/backlog.md` and parse the table to answer questions about features, statuses, priorities.
-
-### Update a feature's status
-1. Edit the table row in `context/backlog.md`
-2. Edit the `**Status:**` line in the feature file
-
-### Add a new feature
-1. Determine the next FXX number (scan existing files)
-2. Create `context/FXX-slug.md` with the standard header format
-3. Add a row to the table in `context/backlog.md`
-
-### Reorder features
-Edit the table rows in `context/backlog.md` — row position defines display order.
-
-### Launch the TUI
-If the user wants to interactively manage the backlog, first ensure the
-`backlog` command is installed, then launch it:
-
-```bash
-# Install if missing, or upgrade if the PATH binary is older than this plugin.
-# A plain `which backlog` check is NOT enough: it short-circuits forever once any
-# binary exists, so plugin auto-updates would never reach the command you run.
-PLUGIN_VER=$(python3 -c "import json,os;print(json.load(open(os.environ['CLAUDE_PLUGIN_DIR']+'/.claude-plugin/plugin.json'))['version'])")
-CUR_VER=$(backlog --version 2>/dev/null || echo none)
-
-if [ "$CUR_VER" != "$PLUGIN_VER" ]; then
-  echo "backlog: $CUR_VER -> $PLUGIN_VER"
-  if command -v pipx >/dev/null 2>&1; then
-    pipx install --force --backend pip "${CLAUDE_PLUGIN_DIR}"
-  else
-    pip install --upgrade "${CLAUDE_PLUGIN_DIR}" --break-system-packages
-  fi
-fi
-
-# Then launch
-backlog
-```
-
-Prefer `pipx` when present — it isolates the tool instead of writing into system
-Python. `--backend pip` sidesteps pipx's `uv` version requirement. Versions older
-than 1.2.0 have no `--version` flag, so `CUR_VER` reads `none` and they upgrade
-correctly on first run.
-
-If the project uses a standalone `backlog-tool.py` script instead:
-```bash
-python3 backlog-tool.py context
-```
-
-### Scaffold a new backlog
-First ensure `backlog` is installed (see above), then:
-```bash
-backlog --init       # creates context/ with backlog.md and a sample feature
-```
-
-## Important
-
-- Always read `context/backlog.md` first to understand the current state
-- Never reorder by renaming files — order lives in backlog.md table rows
-- Feature file naming: `FXX-slug.md` (e.g., `F03-fire-modes.md`)
-- Plan/research files: `FXX-slug-plan.md`, `FXX-slug-research.md`
+- **Reorder:** row position in `backlog.md` defines order within a category. Move the row;
+  never rename files to reorder.
+- **Launch the TUI** (interactive, for the user - not for an agent): `backlog`, after
+  running `ensure-installed.sh` above. A standalone-script project may use
+  `python3 backlog-tool.py context` instead.
+- **Scaffold a new backlog:** `backlog --init` at the project root, one backlog per project.
