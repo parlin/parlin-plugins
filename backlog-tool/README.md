@@ -101,6 +101,7 @@ It deliberately uses plain markdown in a conventional file layout: tasks and pla
 | ←/→ | Move between columns |
 | Enter/Space | Open value picker on Category/Status cell |
 | Shift+↑/↓ | Reorder feature within its category |
+| f | Filter which categories are shown (also: click the **Cat.** header, or ↑ onto it and Enter) |
 | e | Edit description |
 | p | Edit plan file |
 | x | Edit research file |

@@ -457,6 +457,36 @@ class TuiActuallyRuns(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(before, (ctx / "backlog.md").read_bytes(),
                                  "a save with no edits must not touch the file")
 
+    async def test_category_filter(self):
+        with TemporaryDirectory() as tmp:
+            ctx = Path(tmp) / "context"
+            run("--init", str(ctx))
+            run("add", "Soon", "-c", "now", "-d", str(ctx))
+            run("add", "Someday", "-c", "later", "-d", str(ctx))
+            from backlog_tool.tui import BacklogApp, CategoryFilterScreen
+            app = BacklogApp(ctx)
+            shown = lambda: {f.category for f in app.display_rows if f is not None}
+            before = (ctx / "backlog.md").read_bytes()
+            async with app.run_test() as pilot:
+                self.assertEqual(shown(), {"now", "next", "later"})
+                await pilot.press("right", "right", "up")   # onto the Cat. header
+                self.assertTrue(app._header_focused)
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, CategoryFilterScreen)
+                await pilot.press("space", "down", "space", "enter")  # All off, "now" on
+                await pilot.pause()
+                self.assertEqual(shown(), {"now"})
+                await pilot.press("f")
+                await pilot.pause()
+                await pilot.press("space", "enter")                   # All back on
+                await pilot.pause()
+                self.assertEqual(shown(), {"now", "next", "later"})
+                await pilot.press("s")
+                await pilot.pause()
+            self.assertEqual(before, (ctx / "backlog.md").read_bytes(),
+                             "the filter is view state and must not touch the files")
+
 
 if __name__ == "__main__":
     unittest.main()

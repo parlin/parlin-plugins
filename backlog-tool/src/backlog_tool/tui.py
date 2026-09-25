@@ -11,6 +11,7 @@ Keys:
   ←/→          Move between columns (same row)
   Enter/Space   Open value picker on Category/Status cell
   Shift+↑/↓    Reorder feature within its category group
+  f             Filter categories (also: click the Cat. header, or ↑ onto it + Enter)
   e             Edit description        s       Save all changes
   p             Edit plan file          x       Edit research file
   n             New feature             d       Delete feature
@@ -48,11 +49,13 @@ from textual.widgets import (
     ListView,
     Markdown,
     OptionList,
+    SelectionList,
     Static,
     TextArea,
     Input,
 )
 from textual.widgets.option_list import Option
+from textual.widgets.selection_list import Selection
 from rich.text import Text
 
 from .model import (
@@ -235,6 +238,101 @@ class ValuePickerScreen(ModalScreen):
         if not self._dismissed:
             self._dismissed = True
             self.dismiss(event.option.id)
+
+    def action_cancel(self):
+        if not self._dismissed:
+            self._dismissed = True
+            self.dismiss(None)
+
+
+# ── Category filter dialog ────────────────────────────────────────────
+
+ALL_OPTION = "_all"
+
+
+class CategoryFilterScreen(ModalScreen):
+    """Multiselect of categories to show. Dismisses with the chosen set, or None on cancel."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", priority=True),
+        # Enter would otherwise toggle the highlighted option, like Space does
+        Binding("enter", "apply", "Apply", priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    CategoryFilterScreen {
+        align: center middle;
+    }
+    #filter-box {
+        width: 36;
+        height: auto;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #filter-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #filter-list { height: auto; }
+    #filter-buttons { height: auto; margin-top: 1; }
+    #filter-buttons Button { min-width: 10; margin-right: 1; }
+    """
+
+    def __init__(self, categories: list[str], visible: set[str]):
+        super().__init__()
+        self._categories = categories
+        self._visible = visible
+        self._syncing = False
+        self._dismissed = False
+
+    def compose(self):
+        with Vertical(id="filter-box"):
+            yield Label(" Show categories ", id="filter-title")
+            all_on = all(c in self._visible for c in self._categories)
+            options = [Selection("All", ALL_OPTION, all_on)]
+            for cat in self._categories:
+                color = CAT_COLORS.get(cat, "white")
+                options.append(Selection(f"[{color}]{cat}[/]", cat, cat in self._visible))
+            yield SelectionList[str](*options, id="filter-list")
+            with Horizontal(id="filter-buttons"):
+                yield Button("Apply", id="filter-apply", variant="primary")
+                yield Button("Cancel", id="filter-cancel")
+
+    def on_mount(self):
+        self.query_one("#filter-list", SelectionList).focus()
+
+    def on_selection_list_selection_toggled(self, event: SelectionList.SelectionToggled):
+        """Keep "All" in step with the individual categories."""
+        if self._syncing:
+            return
+        sl = self.query_one("#filter-list", SelectionList)
+        self._syncing = True
+        try:
+            if event.selection.value == ALL_OPTION:
+                if ALL_OPTION in sl.selected:
+                    sl.select_all()
+                else:
+                    sl.deselect_all()
+            elif all(c in sl.selected for c in self._categories):
+                sl.select(ALL_OPTION)
+            else:
+                sl.deselect(ALL_OPTION)
+        finally:
+            self._syncing = False
+
+    def on_button_pressed(self, event: Button.Pressed):
+        event.stop()
+        if event.button.id == "filter-apply":
+            self.action_apply()
+        else:
+            self.action_cancel()
+
+    def action_apply(self):
+        if not self._dismissed:
+            self._dismissed = True
+            sl = self.query_one("#filter-list", SelectionList)
+            self.dismiss({v for v in sl.selected if v != ALL_OPTION})
 
     def action_cancel(self):
         if not self._dismissed:
@@ -765,6 +863,7 @@ class BacklogApp(App):
         Binding("p", "edit_plan", "Plan"),
         Binding("x", "edit_research", "Research"),
         Binding("n", "new_feature", "New"),
+        Binding("f", "filter_categories", "Filter"),
         Binding("d", "delete_feature", "Delete"),
         Binding("c", "toggle_claude", "Claude"),
         Binding("i", "implement", "Implement"),
@@ -793,6 +892,8 @@ class BacklogApp(App):
         self._quit_confirmed: bool = False
         self._order_dirty: bool = False  # manual reorder not yet written to backlog.md
         self._picker_open: bool = False
+        self._hidden_cats: set[str] = set()  # category filter — view state only, never saved
+        self._header_focused: bool = False   # keyboard cursor is on the Cat. column header
         self._active_tab: str = "description"  # "description", "plan", or "research"
         self._edit_snapshot: str = ""  # original text when editing started
         self._script_path = Path(__file__).resolve()
@@ -834,6 +935,8 @@ class BacklogApp(App):
         rows: list[Feature | None] = []
         current_cat = None
         for f in self.features:
+            if f.category in self._hidden_cats:
+                continue
             if f.category != current_cat:
                 current_cat = f.category
                 rows.append(None)
@@ -852,7 +955,7 @@ class BacklogApp(App):
                 yield DataTable(id="feature-table")
             yield DetailPane(id="detail-pane")
         yield Static("", id="update-bar")
-        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  i impl  │  s save  │  \\[/] resize", id="status-bar")
+        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  f filter  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  i impl  │  s save  │  \\[/] resize", id="status-bar")
         yield Footer()
 
     def on_mount(self):
@@ -867,6 +970,7 @@ class BacklogApp(App):
         table.add_column("Feature", key="name", width=30)
         table.add_column("Cat.", key="category", width=7)
         table.add_column("Status", key="status", width=12)
+        self._update_cat_header()
         self._refresh_table()
         if len(self.display_rows) > 1:
             table.move_cursor(row=1, column=0)
@@ -903,6 +1007,20 @@ class BacklogApp(App):
 
         if preserve_cursor and 0 <= old_row < len(self.display_rows):
             table.move_cursor(row=old_row, column=old_col)
+
+    def _first_feature_row(self) -> int:
+        for i, entry in enumerate(self.display_rows):
+            if entry is not None:
+                return i
+        return -1
+
+    def _move_cursor_to(self, feature: Feature | None) -> bool:
+        table = self.query_one("#feature-table", DataTable)
+        for i, entry in enumerate(self.display_rows):
+            if entry is not None and entry is feature:
+                table.move_cursor(row=i, column=table.cursor_column)
+                return True
+        return False
 
     def _current_feature(self) -> Feature | None:
         table = self.query_one("#feature-table", DataTable)
@@ -1106,6 +1224,10 @@ class BacklogApp(App):
                     table.move_cursor(row=candidate, column=table.cursor_column)
                     return
 
+        # A click elsewhere in the table leaves the header (table refreshes
+        # re-highlight the same row, so only a real move counts)
+        if self._header_focused and row_idx != self._last_cursor_row:
+            self._set_header_focus(False)
         prev_row = self._last_cursor_row
         self._last_cursor_row = row_idx
         if not self.editing:
@@ -1129,6 +1251,30 @@ class BacklogApp(App):
         if self._quit_confirmed and event.key != "q":
             self._quit_confirmed = False
             self._set_status("Quit cancelled")
+
+        # Keys typed inside a modal bubble up here too — leave them alone
+        if isinstance(self.screen, ModalScreen):
+            return
+
+        # Keyboard focus on the Cat. header: Enter/Space opens the filter,
+        # ↓ returns to the list, any other key just drops the header focus.
+        if self._header_focused:
+            if event.key in ("enter", "space"):
+                event.prevent_default()
+                self.action_filter_categories()
+                return
+            self._set_header_focus(False)
+            if event.key in ("down", "escape"):
+                event.prevent_default()
+                return
+        # ↑ from the top row of the Cat. column steps onto its header
+        if event.key == "up" and self._current_col_key() == "category":
+            table = self.query_one("#feature-table", DataTable)
+            first = self._first_feature_row()
+            if first == -1 or table.cursor_row <= first:
+                event.prevent_default()
+                self._set_header_focus(True)
+                return
 
         # Shift+arrow: reorder within category
         if event.key == "shift+up":
@@ -1172,18 +1318,81 @@ class BacklogApp(App):
                 feature.set_category(value)
                 self._sort_features()
                 self._refresh_table()
-                table = self.query_one("#feature-table", DataTable)
-                for i, entry in enumerate(self.display_rows):
-                    if entry is feature:
-                        table.move_cursor(row=i, column=table.cursor_column)
-                        break
+                self._move_cursor_to(feature)
             else:
                 feature.set_status(value)
                 self._refresh_table(preserve_cursor=True)
             self._update_detail()
-            self._set_status(f"{feature.fid} {col} → {value}")
+            hidden = " (hidden by the category filter)" if value in self._hidden_cats else ""
+            self._set_status(f"{feature.fid} {col} → {value}{hidden}")
 
         self.push_screen(ValuePickerScreen(title, options, current, colors), on_pick)
+
+    # ── Category filter ────────────────────────────────────────────────
+
+    def _filter_categories(self) -> list[str]:
+        """The standard categories, plus any non-standard ones the files use."""
+        cats = list(CATEGORIES)
+        for f in self.features:
+            if f.category not in cats:
+                cats.append(f.category)
+        return cats
+
+    def _update_cat_header(self):
+        """Header shows ▾ (opens the filter), * while filtering, reverse while keyboard-focused."""
+        table = self.query_one("#feature-table", DataTable)
+        text = "Cat.*▾" if self._hidden_cats else "Cat. ▾"
+        style = "reverse bold" if self._header_focused else ("bold #f59e0b" if self._hidden_cats else "")
+        for idx, (key, column) in enumerate(table.columns.items()):
+            if key.value == "category":
+                column.label = Text(text, style=style)
+                table.refresh_column(idx)
+                break
+        table.refresh()
+
+    def _set_header_focus(self, focused: bool):
+        self._header_focused = focused
+        self._update_cat_header()
+        if focused:
+            self._set_status("Category header — Enter to filter categories, ↓ back to list")
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
+        if event.column_key.value == "category":
+            event.stop()
+            self.action_filter_categories()
+
+    def action_filter_categories(self):
+        if self._picker_open or self.editing:
+            return
+        self._picker_open = True
+        cats = self._filter_categories()
+        current = self._current_feature()
+
+        def on_pick(visible: set[str] | None):
+            self._picker_open = False
+            self._set_header_focus(False)
+            if visible is None:
+                return
+            if not visible:
+                visible = set(cats)  # an empty filter would only show an empty list
+                self._set_status("No category selected — showing all")
+            self._hidden_cats = {c for c in cats if c not in visible}
+            self._update_cat_header()
+            self._refresh_table()
+            if not self._move_cursor_to(current):
+                first = self._first_feature_row()
+                if first != -1:
+                    table = self.query_one("#feature-table", DataTable)
+                    table.move_cursor(row=first, column=table.cursor_column)
+            self._update_detail()
+            if self._hidden_cats:
+                shown = ", ".join(c for c in cats if c in visible)
+                self._set_status(f"Showing categories: {shown}")
+            elif visible == set(cats):
+                self._set_status("Showing all categories")
+
+        visible_now = {c for c in cats if c not in self._hidden_cats}
+        self.push_screen(CategoryFilterScreen(cats, visible_now), on_pick)
 
     # ── Reorder ────────────────────────────────────────────────────────
 
@@ -1758,6 +1967,10 @@ class BacklogApp(App):
                 filename=filename, body="## Description\n_(To be filled in)_",
             )
             new_feature.dirty = True
+            if new_feature.category in self._hidden_cats:
+                # Don't let a brand-new feature vanish behind the filter
+                self._hidden_cats.discard(new_feature.category)
+                self._update_cat_header()
             self.features.append(new_feature)
             self._sort_features()
             self._refresh_table()
