@@ -11,19 +11,27 @@ from pathlib import Path
 
 # ── Constants ──────────────────────────────────────────────────────────
 
-CATEGORIES = ["now", "next", "later", "maybe"]
+TIMINGS = ["now", "next", "later", "maybe"]
 STATUSES = ["idea", "research-needed", "researching", "research-done", "ready", "in-progress", "to-review", "shipped", "parked"]
 
-CAT_ORDER = {cat: i for i, cat in enumerate(CATEGORIES)}
+TIMING_ORDER = {t: i for i, t in enumerate(TIMINGS)}
+
+# "Timing" was called "Category" up to 1.7.0. These aliases exist because this
+# package is published and something outside this repo may still import them.
+CATEGORIES = TIMINGS
+CAT_ORDER = TIMING_ORDER
 
 # ── Feature model ──────────────────────────────────────────────────────
 
 class Feature:
-    def __init__(self, fid: str, name: str, category: str, status: str, filename: str, body: str):
+    def __init__(self, fid: str, name: str, timing: str, status: str, filename: str,
+                 body: str, theme: str = ""):
         self.fid = fid
         self.name = name
-        self.category = category.strip().lower()
+        self.timing = timing.strip().lower()
         self.status = status.strip().lower()
+        # A theme groups related features, the way an epic does. Empty means none.
+        self.theme = theme.strip()
         self.filename = filename
         self.body = body
         self.dirty = False
@@ -36,9 +44,28 @@ class Feature:
         self._plan_dirty: bool = False
         self._research_dirty: bool = False
 
+    @property
+    def category(self) -> str:
+        """Pre-1.8.0 name for `timing`, kept for outside callers."""
+        return self.timing
+
+    @category.setter
+    def category(self, val: str):
+        self.timing = val
+
+    def set_timing(self, val: str):
+        if val != self.timing:
+            self.timing = val
+            self.dirty = True
+
     def set_category(self, val: str):
-        if val != self.category:
-            self.category = val
+        """Pre-1.8.0 name for `set_timing`."""
+        self.set_timing(val)
+
+    def set_theme(self, val: str):
+        val = (val or "").strip()
+        if val != self.theme:
+            self.theme = val
             self.dirty = True
 
     def set_status(self, val: str):
@@ -84,7 +111,7 @@ def parse_feature_file(filepath: Path) -> Feature:
     text = filepath.read_text(encoding="utf-8")
     lines = text.split("\n")
     fid = filepath.stem.split("-")[0]
-    name, category, status = "", "later", "idea"
+    name, timing, status, theme = "", "later", "idea", ""
     body_start = 0
 
     for i, line in enumerate(lines):
@@ -95,9 +122,13 @@ def parse_feature_file(filepath: Path) -> Feature:
         elif stripped.lower().startswith("**status:**"):
             m = re.search(r"\*\*Status:\*\*\s*(\S+)", stripped, re.IGNORECASE)
             if m: status = m.group(1).strip().lower()
-        elif stripped.lower().startswith("**category:**"):
-            m = re.search(r"\*\*Category:\*\*\s*(\S+)", stripped, re.IGNORECASE)
-            if m: category = m.group(1).strip().lower()
+        elif stripped.lower().startswith(("**timing:**", "**category:**")):
+            # **Category:** is the pre-1.8.0 spelling and is still read.
+            m = re.search(r"\*\*(?:Timing|Category):\*\*\s*(\S+)", stripped, re.IGNORECASE)
+            if m: timing = m.group(1).strip().lower()
+        elif stripped.lower().startswith("**theme:**"):
+            m = re.search(r"\*\*Theme:\*\*\s*(.+)", stripped, re.IGNORECASE)
+            if m: theme = m.group(1).strip()
         elif stripped.startswith("## "):
             body_start = i
             break
@@ -109,13 +140,18 @@ def parse_feature_file(filepath: Path) -> Feature:
                 break
 
     body = "\n".join(lines[body_start:]).strip()
-    return Feature(fid=fid.upper(), name=name, category=category, status=status,
-                   filename=filepath.name, body=body)
+    return Feature(fid=fid.upper(), name=name, timing=timing, status=status,
+                   filename=filepath.name, body=body, theme=theme)
 
 
 def save_feature_file(context_dir: Path, feature: Feature):
     filepath = context_dir / feature.filename
-    content = f"# {feature.fid}: {feature.name}\n\n**Status:** {feature.status}\n**Category:** {feature.category}\n\n{feature.body}\n"
+    # The Theme line is omitted entirely when unset, so an unthemed file looks
+    # exactly as it did before themes existed.
+    theme_line = f"**Theme:** {feature.theme}\n" if feature.theme else ""
+    content = (f"# {feature.fid}: {feature.name}\n\n"
+               f"**Status:** {feature.status}\n**Timing:** {feature.timing}\n{theme_line}"
+               f"\n{feature.body}\n")
     filepath.write_text(content, encoding="utf-8")
     feature.dirty = False
 
@@ -177,7 +213,7 @@ def save_backlog_index(context_dir: Path, features: list[Feature]):
         title, "",
         "> Lean index of all features. Each row links to a detailed feature file.",
         "> Open the feature file to see full scope, design notes, dependencies, and open questions.",
-        "", "## Category Key",
+        "", "## Timing Key",
         "- **now** — Shipped or actively being worked on",
         "- **next** — Up next, research done or low-hanging fruit",
         "- **later** — Planned but not yet prioritized",
@@ -193,11 +229,11 @@ def save_backlog_index(context_dir: Path, features: list[Feature]):
         "- **shipped** — Live",
         "- **parked** — Deprioritized or blocked",
         "", "---", "",
-        "| # | Feature | Category | Status | File |",
-        "|---|---|---|---|---|",
+        "| # | Feature | Theme | Timing | Status | File |",
+        "|---|---|---|---|---|---|",
     ]
     for f in features:
-        lines.append(f"| {f.fid} | {f.name} | {f.category} | {f.status} | `{f.filename}` |")
+        lines.append(f"| {f.fid} | {f.name} | {f.theme} | {f.timing} | {f.status} | `{f.filename}` |")
     lines.append("")
     if existing_decision_log:
         # rstrip: the capture takes the file's trailing newlines with it, so
@@ -232,36 +268,72 @@ def detect_associated_files(context_dir: Path, features: list[Feature], with_bod
                 feature.research_body = load_associated_body(context_dir, research_name)
 
 
+ROW_FID_PAT = re.compile(r"^F\d{2,3}$", re.IGNORECASE)
+
+
+def parse_table_row(line: str) -> dict | None:
+    """One row of the backlog.md table, or None if the line is not one.
+
+    Two layouts are in the wild:
+
+        | FID | Name | Timing | Status | File |            <- up to 1.7.0
+        | FID | Name | Theme | Timing | Status | File |    <- 1.8.0 on
+
+    Parsed **from the right**, because the rightmost fields are the ones with closed
+    vocabularies: File is last, Status before it, Timing before that. A name
+    containing an unescaped pipe therefore cannot shift timing or status, which is
+    what `apply_backlog_order` relies on. Such a row can still mis-attribute a name
+    fragment as a theme, and its name; the feature file owns the name regardless.
+    """
+    line = line.strip()
+    if not line.startswith("|"):
+        return None
+    parts = [c.strip() for c in line.strip("|").split("|")]
+    if len(parts) < 5 or not ROW_FID_PAT.match(parts[0]):
+        return None
+
+    timing, status = parts[-3].lower(), parts[-2].lower()
+    if timing in TIMING_ORDER and status in STATUSES:
+        has_theme = len(parts) >= 6
+        theme = parts[-4] if has_theme else ""
+        name = " | ".join(parts[1:-4] if has_theme else parts[1:-3])
+    else:
+        # Values outside the vocabularies (a hand-typed status, say). Fall back to
+        # fixed positions, choosing the layout by width.
+        if len(parts) >= 6:
+            theme, timing, status = parts[2], parts[3].lower(), parts[4].lower()
+        else:
+            theme, timing, status = "", parts[2].lower(), parts[3].lower()
+        name = parts[1]
+    return {"fid": parts[0].upper(), "name": name,
+            "theme": theme, "timing": timing, "status": status}
+
+
 def apply_backlog_order(context_dir: Path, features: list[Feature]):
-    """Read backlog.md table — the single source of truth for order, status, and category."""
+    """Read backlog.md table — the source of truth for order, status, timing and theme."""
     backlog_path = context_dir / "backlog.md"
     if not backlog_path.exists():
         return
-    text = backlog_path.read_text(encoding="utf-8")
-    # Parse table rows: | FID | Name | Category | Status | File |
     backlog_data: dict[str, dict] = {}
     idx = 0
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line.startswith("|"):
+    for line in backlog_path.read_text(encoding="utf-8").split("\n"):
+        row = parse_table_row(line)
+        if row is None:
             continue
-        cells = [c.strip() for c in line.split("|")]
-        # cells: ['', FID, Name, Category, Status, File, '']
-        if len(cells) >= 6 and re.match(r"^F\d{2,3}$", cells[1], re.IGNORECASE):
-            fid = cells[1].upper()
-            backlog_data[fid] = {
-                "order": idx,
-                "category": cells[3].strip().lower(),
-                "status": cells[4].strip().lower(),
-            }
-            idx += 1
-    # Apply to features — backlog.md wins for status, category, and order
+        row["order"] = idx
+        backlog_data[row["fid"]] = row
+        idx += 1
+    # Apply to features — backlog.md wins for status, timing, theme and order
     max_order = idx
     for feature in features:
         data = backlog_data.get(feature.fid)
         if data:
-            feature.category = data["category"]
+            feature.timing = data["timing"]
             feature.status = data["status"]
+            # An older table has no theme column; keep what the feature file said
+            # rather than blanking it.
+            if data["theme"]:
+                feature.theme = data["theme"]
             feature._backlog_pos = data["order"]
         else:
             feature._backlog_pos = max_order
@@ -269,7 +341,7 @@ def apply_backlog_order(context_dir: Path, features: list[Feature]):
 
 
 def sort_features(features: list[Feature]):
-    features.sort(key=lambda f: (CAT_ORDER.get(f.category, 99), f._backlog_pos))
+    features.sort(key=lambda f: (TIMING_ORDER.get(f.timing, 99), f._backlog_pos))
 
 
 def read_backlog_rows(context_dir: Path) -> list[str]:
@@ -279,12 +351,9 @@ def read_backlog_rows(context_dir: Path) -> list[str]:
         return []
     fids = []
     for line in backlog_path.read_text(encoding="utf-8").split("\n"):
-        line = line.strip()
-        if not line.startswith("|"):
-            continue
-        cells = [c.strip() for c in line.split("|")]
-        if len(cells) >= 6 and re.match(r"^F\d{2,3}$", cells[1], re.IGNORECASE):
-            fids.append(cells[1].upper())
+        row = parse_table_row(line)
+        if row is not None:
+            fids.append(row["fid"])
     return fids
 
 
@@ -324,6 +393,67 @@ def slugify(name: str) -> str:
     return s[:60].rstrip("-") or "feature"
 
 
+# ── Themes ─────────────────────────────────────────────────────────────
+
+# A theme is not declared anywhere: it exists because a feature uses it. That
+# keeps one source of truth, at the cost of leaving typo-prevention to the picker.
+NO_THEME = "(none)"
+
+
+def themes_in_use(features: list[Feature]) -> list[str]:
+    """Distinct themes, case-insensitively deduplicated, in alphabetical order."""
+    seen: dict[str, str] = {}
+    for f in features:
+        if f.theme:
+            seen.setdefault(f.theme.lower(), f.theme)
+    return [seen[k] for k in sorted(seen)]
+
+
+def theme_counts(features: list[Feature]) -> list[tuple[str, int]]:
+    """(theme, count) by descending count, then name. Unthemed features are excluded."""
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for f in features:
+        if not f.theme:
+            continue
+        k = f.theme.lower()
+        counts[k] = counts.get(k, 0) + 1
+        labels.setdefault(k, f.theme)
+    return [(labels[k], counts[k]) for k in sorted(counts, key=lambda k: (-counts[k], k))]
+
+
+# ── Migration to the 1.8.0 spelling ────────────────────────────────────
+
+def migrate(context_dir: Path, dry_run: bool = False) -> list[str]:
+    """Rewrite `**Category:**` as `**Timing:**` and the table with its Theme column.
+
+    Idempotent: a backlog already on the new spelling reports nothing. Returns one
+    line per file that needs changing (or was changed).
+    """
+    changed: list[str] = []
+    cat_line = re.compile(r"^\*\*Category:\*\*(\s*)", re.IGNORECASE | re.MULTILINE)
+    for path in sorted(context_dir.iterdir()):
+        if not FEATURE_PAT.match(path.name) or ASSOCIATED_PAT.search(path.name):
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not cat_line.search(text):
+            continue
+        changed.append(f"{path.name}: **Category:** -> **Timing:**")
+        if not dry_run:
+            path.write_text(cat_line.sub(r"**Timing:**\1", text), encoding="utf-8")
+
+    backlog = context_dir / "backlog.md"
+    if backlog.exists():
+        text = backlog.read_text(encoding="utf-8")
+        needs_table = "| # | Feature | Theme | Timing | Status | File |" not in text
+        if needs_table:
+            changed.append("backlog.md: table gains a Theme column, Category header -> Timing")
+            if not dry_run:
+                # Load after the feature files were rewritten, so themes read correctly.
+                save_backlog_index(context_dir, load_features(context_dir, with_bodies=False))
+    return changed
+
+
 # ── Init scaffolding ──────────────────────────────────────────────────
 
 BACKLOG_TEMPLATE = """\
@@ -332,7 +462,7 @@ BACKLOG_TEMPLATE = """\
 > Lean index of all features. Each row links to a detailed feature file.
 > Open the feature file to see full scope, design notes, dependencies, and open questions.
 
-## Category Key
+## Timing Key
 - **now** — Shipped or actively being worked on
 - **next** — Up next, research done or low-hanging fruit
 - **later** — Planned but not yet prioritized
@@ -351,9 +481,9 @@ BACKLOG_TEMPLATE = """\
 
 ---
 
-| # | Feature | Category | Status | File |
-|---|---|---|---|---|
-| F01 | Example Feature | next | idea | `F01-example-feature.md` |
+| # | Feature | Theme | Timing | Status | File |
+|---|---|---|---|---|---|
+| F01 | Example Feature |  | next | idea | `F01-example-feature.md` |
 
 ---
 
@@ -367,14 +497,15 @@ BACKLOG_TEMPLATE = """\
 1. **Starting work on a feature?** Update status to `in-progress` in the backlog table.
 2. **Feature shipped?** Update status to `shipped`, note version/date in the feature file.
 3. **New idea?** Press `n` in the tool, or create a new `FXX-name.md` file and add a row here.
-4. **Reprioritizing?** Change the category column (now/next/later/maybe).
+4. **Reprioritizing?** Change the timing column (now/next/later/maybe).
+5. **Grouping related work?** Put a theme in the theme column — it works like an epic.
 """
 
 SAMPLE_FEATURE = """\
 # F01: Example Feature
 
 **Status:** idea
-**Category:** next
+**Timing:** next
 
 ## Description
 Describe what this feature does and why it matters.

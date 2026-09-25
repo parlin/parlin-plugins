@@ -9,9 +9,10 @@ Usage: python3 backlog-tool.py [context-dir]
 Keys:
   ↑/↓          Move between rows (same column)
   ←/→          Move between columns (same row)
-  Enter/Space   Open value picker on Category/Status cell
-  Shift+↑/↓    Reorder feature within its category group
-  f             Filter categories (also: click the Cat. header, or ↑ onto it + Enter)
+  Enter/Space   Open value picker on the Theme, Timing or Status cell
+  Shift+↑/↓    Reorder feature within its timing group
+  f             Filter the current column: Theme, Timing or Status
+                (also: click a ▾ header, or ↑ onto it + Enter)
   e             Edit description        s       Save all changes
   p             Edit plan file          x       Edit research file
   n             New feature             d       Delete feature
@@ -61,9 +62,10 @@ from rich.text import Text
 from .model import (
     BACKLOG_TEMPLATE,
     SAMPLE_FEATURE,
-    CATEGORIES,
-    CAT_ORDER,
+    NO_THEME,
     STATUSES,
+    TIMINGS,
+    TIMING_ORDER,
     Feature,
     apply_backlog_order,
     detect_associated_files,
@@ -72,6 +74,7 @@ from .model import (
     load_associated_body,
     load_features,
     next_fid,
+    themes_in_use,
     parse_feature_file,
     save_associated_file,
     save_backlog_index,
@@ -82,15 +85,36 @@ from .model import (
 # ── Constants ──────────────────────────────────────────────────────────
 
 # Column keys in order
-COL_KEYS = ["fid", "name", "category", "status"]
-EDITABLE_COLS = {"category", "status"}
+COL_KEYS = ["fid", "name", "theme", "timing", "status"]
+EDITABLE_COLS = {"theme", "timing", "status"}
+# Columns whose header carries a ▾ and opens a filter.
+FILTER_COLS = ["theme", "timing", "status"]
+COL_TITLES = {"theme": "Theme", "timing": "Timing", "status": "Status"}
+# The Theme column sizes itself to the longest theme in use: themes are user-invented,
+# so a fixed width either truncates "sync & conflicts" or wastes space on "ux".
+THEME_COL_MIN, THEME_COL_MAX = 8, 22
 
-CAT_COLORS = {
+TIMING_COLORS = {
     "now":   "#22c55e",
     "next":  "#3b82f6",
     "later": "#a855f7",
     "maybe": "#6b7280",
 }
+# Themes are user-invented, so their colors cannot be a fixed map. A stable hash
+# keeps a given theme the same color across sessions and across backlogs.
+THEME_PALETTE = ["#38bdf8", "#f472b6", "#a3e635", "#fbbf24", "#c084fc",
+                 "#2dd4bf", "#fb923c", "#94a3b8"]
+
+
+def theme_color(theme: str) -> str:
+    if not theme:
+        return "#4b5563"
+    h = 0
+    for ch in theme.lower():
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    return THEME_PALETTE[h % len(THEME_PALETTE)]
+
+
 STATUS_COLORS = {
     "idea":            "#6b7280",
     "research-needed": "#d97706",
@@ -245,13 +269,17 @@ class ValuePickerScreen(ModalScreen):
             self.dismiss(None)
 
 
-# ── Category filter dialog ────────────────────────────────────────────
+# ── Column filter dialog ──────────────────────────────────────────────
 
 ALL_OPTION = "_all"
 
 
-class CategoryFilterScreen(ModalScreen):
-    """Multiselect of categories to show. Dismisses with the chosen set, or None on cancel."""
+class ColumnFilterScreen(ModalScreen):
+    """Multiselect of the values to show in one column.
+
+    Dismisses with the chosen set, or None on cancel. Used by Theme, Timing and
+    Status alike — the column only supplies its title, its values and their colors.
+    """
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", priority=True),
@@ -260,7 +288,7 @@ class CategoryFilterScreen(ModalScreen):
     ]
 
     DEFAULT_CSS = """
-    CategoryFilterScreen {
+    ColumnFilterScreen {
         align: center middle;
     }
     #filter-box {
@@ -279,21 +307,23 @@ class CategoryFilterScreen(ModalScreen):
     #filter-buttons Button { min-width: 10; margin-right: 1; }
     """
 
-    def __init__(self, categories: list[str], visible: set[str]):
+    def __init__(self, title: str, values: list[str], visible: set[str], colors=None):
         super().__init__()
-        self._categories = categories
+        self._title = title
+        self._values = values
         self._visible = visible
+        self._colors = colors or {}
         self._syncing = False
         self._dismissed = False
 
     def compose(self):
         with Vertical(id="filter-box"):
-            yield Label(" Show categories ", id="filter-title")
-            all_on = all(c in self._visible for c in self._categories)
+            yield Label(f" Show {self._title.lower()} ", id="filter-title")
+            all_on = all(v in self._visible for v in self._values)
             options = [Selection("All", ALL_OPTION, all_on)]
-            for cat in self._categories:
-                color = CAT_COLORS.get(cat, "white")
-                options.append(Selection(f"[{color}]{cat}[/]", cat, cat in self._visible))
+            for val in self._values:
+                color = self._colors.get(val, "white") if isinstance(self._colors, dict) else self._colors(val)
+                options.append(Selection(f"[{color}]{val}[/]", val, val in self._visible))
             yield SelectionList[str](*options, id="filter-list")
             with Horizontal(id="filter-buttons"):
                 yield Button("Apply ⏎", id="filter-apply", variant="primary")
@@ -314,7 +344,7 @@ class CategoryFilterScreen(ModalScreen):
                     sl.select_all()
                 else:
                     sl.deselect_all()
-            elif all(c in sl.selected for c in self._categories):
+            elif all(v in sl.selected for v in self._values):
                 sl.select(ALL_OPTION)
             else:
                 sl.deselect(ALL_OPTION)
@@ -352,6 +382,31 @@ class NewFeatureScreen(ModalScreen):
             Input(id="feat-name", placeholder="e.g. Dark mode"),
             Label(""),
             Label("[Enter] Create  [Escape] Cancel", id="dialog-hint"),
+            id="dialog",
+        )
+
+    def on_input_submitted(self, event: Input.Submitted):
+        name = event.value.strip()
+        self.dismiss(name if name else None)
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
+# ── New Theme dialog ───────────────────────────────────────────────────
+
+class NewThemeScreen(ModalScreen):
+    """Asks for a theme name. Themes are created here, not declared anywhere."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def compose(self):
+        yield Vertical(
+            Label(" New Theme ", id="dialog-title"),
+            Label("Theme name:"),
+            Input(id="theme-name", placeholder="e.g. moments"),
+            Label(""),
+            Label("[Enter] Assign  [Escape] Cancel", id="dialog-hint"),
             id="dialog",
         )
 
@@ -775,9 +830,9 @@ class DetailPane(Widget):
             mode_label = "  [#6b7280]read-only agent view \u2014 \\[o] open interactive[/]"
         header.update(f"[bold]{feature.fid}: {feature.name}[/bold]{dirty}{mode_label}")
 
-        cc = CAT_COLORS.get(feature.category, "white")
+        cc = TIMING_COLORS.get(feature.timing, "white")
         sc = STATUS_COLORS.get(feature.status, "white")
-        meta.update(f"Category: [{cc}]{feature.category}[/]  Status: [{sc}]{feature.status}[/]  File: {feature.filename}")
+        meta.update(f"Category: [{cc}]{feature.timing}[/]  Status: [{sc}]{feature.status}[/]  File: {feature.filename}")
 
         # Agent tab: live terminal mirror \u2014 no editor, no markdown.
         if active_tab == "agent":
@@ -863,7 +918,7 @@ class BacklogApp(App):
         Binding("p", "edit_plan", "Plan"),
         Binding("x", "edit_research", "Research"),
         Binding("n", "new_feature", "New"),
-        Binding("f", "filter_categories", "Filter"),
+        Binding("f", "filter_column", "Filter"),
         Binding("d", "delete_feature", "Delete"),
         Binding("c", "toggle_claude", "Claude"),
         Binding("i", "implement", "Implement"),
@@ -892,8 +947,10 @@ class BacklogApp(App):
         self._quit_confirmed: bool = False
         self._order_dirty: bool = False  # manual reorder not yet written to backlog.md
         self._picker_open: bool = False
-        self._hidden_cats: set[str] = set()  # category filter — view state only, never saved
-        self._header_focused: bool = False   # keyboard cursor is on the Cat. column header
+        # One hidden-value set per filterable column. View state only, never saved.
+        self._hidden: dict[str, set[str]] = {c: set() for c in FILTER_COLS}
+        # Which filterable column header the keyboard cursor sits on, if any.
+        self._header_focused_col: str | None = None
         self._active_tab: str = "description"  # "description", "plan", or "research"
         self._edit_snapshot: str = ""  # original text when editing started
         self._script_path = Path(__file__).resolve()
@@ -935,10 +992,10 @@ class BacklogApp(App):
         rows: list[Feature | None] = []
         current_cat = None
         for f in self.features:
-            if f.category in self._hidden_cats:
+            if self._is_hidden(f):
                 continue
-            if f.category != current_cat:
-                current_cat = f.category
+            if f.timing != current_cat:
+                current_cat = f.timing
                 rows.append(None)
             rows.append(f)
         return rows
@@ -955,7 +1012,7 @@ class BacklogApp(App):
                 yield DataTable(id="feature-table")
             yield DetailPane(id="detail-pane")
         yield Static("", id="update-bar")
-        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  f filter  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  i impl  │  s save  │  \\[/] resize", id="status-bar")
+        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  f filter col  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  i impl  │  s save  │  \\[/] resize", id="status-bar")
         yield Footer()
 
     def on_mount(self):
@@ -968,16 +1025,29 @@ class BacklogApp(App):
         table.zebra_stripes = False
         table.add_column("#", key="fid", width=5)
         table.add_column("Feature", key="name", width=30)
-        table.add_column("Cat.", key="category", width=7)
+        table.add_column("Theme ▾", key="theme", width=THEME_COL_MIN)
+        table.add_column("Timing", key="timing", width=8)
         table.add_column("Status", key="status", width=12)
-        self._update_cat_header()
+        self._update_filter_headers()
         self._refresh_table()
         if len(self.display_rows) > 1:
             table.move_cursor(row=1, column=0)
         self._update_detail()
 
+    def _fit_theme_column(self):
+        """Widen the Theme column to the longest theme on show, within bounds."""
+        table = self.query_one("#feature-table", DataTable)
+        longest = max((len(f.theme) for f in self.features if f.theme), default=0)
+        want = max(THEME_COL_MIN, min(longest + 1, THEME_COL_MAX))
+        for key, column in table.columns.items():
+            if key.value == "theme" and column.width != want:
+                column.width = want
+                table._update_dimensions([key])
+                break
+
     def _refresh_table(self, preserve_cursor: bool = False):
         table = self.query_one("#feature-table", DataTable)
+        self._fit_theme_column()
         old_row = table.cursor_row if preserve_cursor else -1
         old_col = table.cursor_column if preserve_cursor else 0
         table.clear()
@@ -988,19 +1058,21 @@ class BacklogApp(App):
                 cat = "—"
                 for j in range(i + 1, len(self.display_rows)):
                     if self.display_rows[j] is not None:
-                        cat = self.display_rows[j].category.upper()
+                        cat = self.display_rows[j].timing.upper()
                         break
-                cc = CAT_COLORS.get(cat.lower(), "#6b7280")
-                table.add_row("", f"[bold {cc}]── {cat} ──[/]", "", "", key=f"_sep_{i}")
+                cc = TIMING_COLORS.get(cat.lower(), "#6b7280")
+                table.add_row("", f"[bold {cc}]── {cat} ──[/]", "", "", "", key=f"_sep_{i}")
             else:
                 f = entry
-                cc = CAT_COLORS.get(f.category, "white")
+                cc = TIMING_COLORS.get(f.timing, "white")
                 sc = STATUS_COLORS.get(f.status, "white")
                 dirty = " •" if f.dirty else ""
                 marker = AGENT_ROW_MARKERS.get(self._agent_state(f.fid) or "", "")
+                tc = theme_color(f.theme)
                 table.add_row(
                     f.fid, f"{f.name}{dirty}{marker}",
-                    f"[{cc}]{f.category}[/]",
+                    f"[{tc}]{f.theme}[/]" if f.theme else "[#4b5563]·[/]",
+                    f"[{cc}]{f.timing}[/]",
                     f"[{sc}]{f.status}[/]",
                     key=f.fid,
                 )
@@ -1226,7 +1298,7 @@ class BacklogApp(App):
 
         # A click elsewhere in the table leaves the header (table refreshes
         # re-highlight the same row, so only a real move counts)
-        if self._header_focused and row_idx != self._last_cursor_row:
+        if self._header_focused_col and row_idx != self._last_cursor_row:
             self._set_header_focus(False)
         prev_row = self._last_cursor_row
         self._last_cursor_row = row_idx
@@ -1256,27 +1328,28 @@ class BacklogApp(App):
         if isinstance(self.screen, ModalScreen):
             return
 
-        # Keyboard focus on the Cat. header: Enter/Space opens the filter,
-        # ↓ returns to the list, any other key just drops the header focus.
-        if self._header_focused:
+        # Keyboard focus on a filterable header: Enter/Space opens that column's
+        # filter, ↓ returns to the list, any other key just drops the header focus.
+        if self._header_focused_col:
             if event.key in ("enter", "space"):
                 event.prevent_default()
-                self.action_filter_categories()
+                self.action_filter_column(self._header_focused_col)
                 return
-            self._set_header_focus(False)
+            col = self._header_focused_col
+            self._set_header_focus(None)
             if event.key in ("down", "escape"):
                 event.prevent_default()
                 return
-        # ↑ from the top row of the Cat. column steps onto its header
-        if event.key == "up" and self._current_col_key() == "category":
+        # ↑ from the top row of a filterable column steps onto its header
+        if event.key == "up" and self._current_col_key() in FILTER_COLS:
             table = self.query_one("#feature-table", DataTable)
             first = self._first_feature_row()
             if first == -1 or table.cursor_row <= first:
                 event.prevent_default()
-                self._set_header_focus(True)
+                self._set_header_focus(self._current_col_key())
                 return
 
-        # Shift+arrow: reorder within category
+        # Shift+arrow: reorder within the timing group
         if event.key == "shift+up":
             event.prevent_default()
             self._move_feature(-1)
@@ -1292,6 +1365,8 @@ class BacklogApp(App):
 
     # ── Value picker ───────────────────────────────────────────────────
 
+    NEW_THEME_OPTION = "＋ new theme…"
+
     def _open_picker(self, col: str):
         feature = self._current_feature()
         if not feature:
@@ -1299,85 +1374,150 @@ class BacklogApp(App):
 
         self._picker_open = True
 
-        if col == "category":
-            options = CATEGORIES
-            current = feature.category
-            colors = CAT_COLORS
-            title = "Category"
+        if col == "timing":
+            options, current, colors, title = list(TIMINGS), feature.timing, TIMING_COLORS, "Timing"
+        elif col == "theme":
+            # Themes are not declared anywhere, so the list is what is in use —
+            # plus a way out for a theme that does not exist yet.
+            options = [NO_THEME] + themes_in_use(self.features) + [self.NEW_THEME_OPTION]
+            current = feature.theme or NO_THEME
+            colors = {t: theme_color(t) for t in options}
+            colors[NO_THEME] = "#4b5563"
+            colors[self.NEW_THEME_OPTION] = "#22c55e"
+            title = "Theme"
         else:
-            options = STATUSES
-            current = feature.status
-            colors = STATUS_COLORS
-            title = "Status"
+            options, current, colors, title = list(STATUSES), feature.status, STATUS_COLORS, "Status"
+
+        def apply(value: str):
+            if col == "timing":
+                feature.set_timing(value)
+                self._sort_features()
+                self._refresh_table()
+                self._move_cursor_to(feature)
+            elif col == "theme":
+                feature.set_theme("" if value == NO_THEME else value)
+                self._refresh_table(preserve_cursor=True)
+            else:
+                feature.set_status(value)
+                self._refresh_table(preserve_cursor=True)
+            self._update_detail()
+            shown = value if col != "theme" or value != NO_THEME else "none"
+            hidden = " (hidden by a filter)" if self._is_hidden(feature) else ""
+            self._set_status(f"{feature.fid} {col} → {shown}{hidden}")
 
         def on_pick(value: str | None):
             self._picker_open = False
             if value is None or not feature:
                 return
-            if col == "category":
-                feature.set_category(value)
-                self._sort_features()
-                self._refresh_table()
-                self._move_cursor_to(feature)
-            else:
-                feature.set_status(value)
-                self._refresh_table(preserve_cursor=True)
-            self._update_detail()
-            hidden = " (hidden by the category filter)" if value in self._hidden_cats else ""
-            self._set_status(f"{feature.fid} {col} → {value}{hidden}")
+            if col == "theme" and value == self.NEW_THEME_OPTION:
+                self._prompt_new_theme(feature, apply)
+                return
+            apply(value)
 
         self.push_screen(ValuePickerScreen(title, options, current, colors), on_pick)
 
-    # ── Category filter ────────────────────────────────────────────────
+    def _prompt_new_theme(self, feature: Feature, apply):
+        """Ask for a theme name, reusing an existing spelling when one matches."""
+        self._picker_open = True
 
-    def _filter_categories(self) -> list[str]:
-        """The standard categories, plus any non-standard ones the files use."""
-        cats = list(CATEGORIES)
-        for f in self.features:
-            if f.category not in cats:
-                cats.append(f.category)
-        return cats
+        def on_name(name: str | None):
+            self._picker_open = False
+            if not name:
+                return
+            name = name.strip()
+            for existing in themes_in_use(self.features):
+                if existing.lower() == name.lower():
+                    name = existing          # don't create a case-variant twin
+                    break
+            apply(name)
 
-    def _update_cat_header(self):
-        """Header shows ▾ (opens the filter), * while filtering, reverse while keyboard-focused."""
+        self.push_screen(NewThemeScreen(), on_name)
+
+    # ── Column filters ─────────────────────────────────────────────────
+
+    def _filter_values(self, col: str) -> list[str]:
+        """Every value the filter should offer for a column, in a stable order."""
+        if col == "timing":
+            values = list(TIMINGS)
+            for f in self.features:
+                if f.timing not in values:
+                    values.append(f.timing)
+            return values
+        if col == "status":
+            values = list(STATUSES)
+            for f in self.features:
+                if f.status not in values:
+                    values.append(f.status)
+            return values
+        # Theme: what is in use, with an explicit entry for the unthemed.
+        return themes_in_use(self.features) + [NO_THEME]
+
+    def _value_of(self, feature: Feature, col: str) -> str:
+        if col == "timing":
+            return feature.timing
+        if col == "status":
+            return feature.status
+        return feature.theme or NO_THEME
+
+    def _is_hidden(self, feature: Feature) -> bool:
+        return any(self._value_of(feature, col) in hidden
+                   for col, hidden in self._hidden.items())
+
+    def _colors_for(self, col: str):
+        if col == "timing":
+            return TIMING_COLORS
+        if col == "status":
+            return STATUS_COLORS
+        return theme_color
+
+    def _update_filter_headers(self):
+        """▾ opens the filter, * marks one that is active, reverse = keyboard focus."""
         table = self.query_one("#feature-table", DataTable)
-        text = "Cat.*▾" if self._hidden_cats else "Cat. ▾"
-        style = "reverse bold" if self._header_focused else ("bold #f59e0b" if self._hidden_cats else "")
         for idx, (key, column) in enumerate(table.columns.items()):
-            if key.value == "category":
-                column.label = Text(text, style=style)
-                table.refresh_column(idx)
-                break
+            col = key.value
+            if col not in FILTER_COLS:
+                continue
+            active = bool(self._hidden[col])
+            label = COL_TITLES[col] + ("*▾" if active else " ▾")
+            style = ("reverse bold" if self._header_focused_col == col
+                     else ("bold #f59e0b" if active else ""))
+            column.label = Text(label, style=style)
+            table.refresh_column(idx)
         table.refresh()
 
-    def _set_header_focus(self, focused: bool):
-        self._header_focused = focused
-        self._update_cat_header()
-        if focused:
-            self._set_status("Category header — Enter to filter categories, ↓ back to list")
+    def _set_header_focus(self, col: str | None):
+        self._header_focused_col = col
+        self._update_filter_headers()
+        if col:
+            self._set_status(f"{COL_TITLES[col]} header — Enter to filter, ↓ back to list")
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
-        if event.column_key.value == "category":
+        if event.column_key.value in FILTER_COLS:
             event.stop()
-            self.action_filter_categories()
+            self.action_filter_column(event.column_key.value)
 
-    def action_filter_categories(self):
+    def action_filter_column(self, col: str | None = None):
+        """Filter a column: the one named, else the one the cursor is in, else Timing."""
         if self._picker_open or self.editing:
             return
+        if col is None:
+            col = self._current_col_key()
+            if col not in FILTER_COLS:
+                col = "timing"
         self._picker_open = True
-        cats = self._filter_categories()
+        values = self._filter_values(col)
         current = self._current_feature()
 
         def on_pick(visible: set[str] | None):
             self._picker_open = False
-            self._set_header_focus(False)
+            self._set_header_focus(None)
             if visible is None:
                 return
             if not visible:
-                visible = set(cats)  # an empty filter would only show an empty list
-                self._set_status("No category selected — showing all")
-            self._hidden_cats = {c for c in cats if c not in visible}
-            self._update_cat_header()
+                visible = set(values)  # an empty filter would only show an empty list
+                self._set_status(f"Nothing selected — showing all {COL_TITLES[col].lower()}s")
+            self._hidden[col] = {v for v in values if v not in visible}
+            self._update_filter_headers()
             self._refresh_table()
             if not self._move_cursor_to(current):
                 first = self._first_feature_row()
@@ -1385,14 +1525,17 @@ class BacklogApp(App):
                     table = self.query_one("#feature-table", DataTable)
                     table.move_cursor(row=first, column=table.cursor_column)
             self._update_detail()
-            if self._hidden_cats:
-                shown = ", ".join(c for c in cats if c in visible)
-                self._set_status(f"Showing categories: {shown}")
-            elif visible == set(cats):
-                self._set_status("Showing all categories")
+            if self._hidden[col]:
+                shown = ", ".join(v for v in values if v in visible)
+                self._set_status(f"{COL_TITLES[col]}: {shown}")
+            elif visible == set(values):
+                self._set_status(f"Showing all {COL_TITLES[col].lower()}s")
 
-        visible_now = {c for c in cats if c not in self._hidden_cats}
-        self.push_screen(CategoryFilterScreen(cats, visible_now), on_pick)
+        visible_now = {v for v in values if v not in self._hidden[col]}
+        self.push_screen(
+            ColumnFilterScreen(COL_TITLES[col], values, visible_now, self._colors_for(col)),
+            on_pick,
+        )
 
     # ── Reorder ────────────────────────────────────────────────────────
 
@@ -1405,13 +1548,13 @@ class BacklogApp(App):
         if target_idx < 0 or target_idx >= len(self.features):
             return
         neighbor = self.features[target_idx]
-        if neighbor.category != feature.category:
-            self._set_status(f"Already at {'top' if direction < 0 else 'bottom'} of {feature.category}")
+        if neighbor.timing != feature.timing:
+            self._set_status(f"Already at {'top' if direction < 0 else 'bottom'} of {feature.timing}")
             return
 
         self.features[feat_idx], self.features[target_idx] = self.features[target_idx], self.features[feat_idx]
         # Renumber positions so a later _sort_features() keeps this order —
-        # without this, any re-sort (e.g. a category change) reverts the move.
+        # without this, any re-sort (e.g. a timing change) reverts the move.
         for i, f in enumerate(self.features):
             f._backlog_pos = i
         self._order_dirty = True
@@ -1425,7 +1568,7 @@ class BacklogApp(App):
                 break
         self._update_detail()
         arrow = "↑" if direction < 0 else "↓"
-        self._set_status(f"Moved {feature.fid} {arrow} within {feature.category}")
+        self._set_status(f"Moved {feature.fid} {arrow} within {feature.timing}")
 
     # ── Tab switching ─────────────────────────────────────────────────
 
@@ -1963,14 +2106,16 @@ class BacklogApp(App):
             filename = f"{fid}-{slug}.md"
 
             new_feature = Feature(
-                fid=fid, name=name, category="next", status="idea",
+                fid=fid, name=name, timing="next", status="idea",
                 filename=filename, body="## Description\n_(To be filled in)_",
             )
             new_feature.dirty = True
-            if new_feature.category in self._hidden_cats:
-                # Don't let a brand-new feature vanish behind the filter
-                self._hidden_cats.discard(new_feature.category)
-                self._update_cat_header()
+            if self._is_hidden(new_feature):
+                # Don't let a brand-new feature vanish behind a filter
+                self._hidden["timing"].discard(new_feature.timing)
+                self._hidden["theme"].discard(new_feature.theme or NO_THEME)
+                self._hidden["status"].discard(new_feature.status)
+                self._update_filter_headers()
             self.features.append(new_feature)
             self._sort_features()
             self._refresh_table()

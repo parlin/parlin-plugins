@@ -16,17 +16,21 @@ import sys
 from pathlib import Path
 
 from .model import (
-    CATEGORIES,
+    NO_THEME,
     STATUSES,
+    TIMINGS,
     Feature,
     do_init,
     get_version,
     load_features,
+    migrate,
     next_fid,
     save_backlog_index,
     save_feature_file,
     slugify,
     sort_features,
+    theme_counts,
+    themes_in_use,
 )
 
 # Hidden by default: a shipped or parked feature is rarely what a question is about,
@@ -70,30 +74,48 @@ def _find(features: list[Feature], fid: str) -> Feature:
     _die(f"no such feature: {fid}")
 
 
-def _row(f: Feature, w: int) -> str:
-    return f"{f.fid:<5} {f.category:<6} {f.status:<15} {f.name[:w]}"
+def _row(f: Feature, w: int, theme_w: int = 0) -> str:
+    theme = f"{(f.theme or '-')[:theme_w]:<{theme_w}} " if theme_w else ""
+    return f"{f.fid:<5} {theme}{f.timing:<6} {f.status:<15} {f.name[:w]}"
+
+
+def _theme_width(features: list[Feature]) -> int:
+    """Only spend a column on themes when some feature actually has one."""
+    widest = max((len(f.theme) for f in features if f.theme), default=0)
+    return min(max(widest, 5), 18) if widest else 0
 
 
 def _as_dict(f: Feature) -> dict:
     return {
-        "fid": f.fid, "name": f.name, "category": f.category, "status": f.status,
-        "file": f.filename, "plan": f.plan_file, "research": f.research_file,
+        "fid": f.fid, "name": f.name, "theme": f.theme, "timing": f.timing,
+        "status": f.status, "file": f.filename,
+        "plan": f.plan_file, "research": f.research_file,
     }
+
+
+def _theme_matches(f: Feature, wanted: set[str] | None) -> bool:
+    if not wanted:
+        return True
+    if f.theme:
+        return f.theme.lower() in wanted
+    return "none" in wanted or NO_THEME in wanted
 
 
 # ── commands ───────────────────────────────────────────────────────────
 
 def cmd_list(args) -> int:
     context_dir = _context_dir(args.dir)
-    cats, stats = _csv(args.category), _csv(args.status)
-    _validate(cats, CATEGORIES, "category")
+    timings, stats, themes = _csv(args.timing), _csv(args.status), _csv(args.theme)
+    _validate(timings, TIMINGS, "timing")
     _validate(stats, STATUSES, "status")
     features = load_features(context_dir, with_bodies=False)
     out = []
     for f in features:
-        if cats and f.category not in cats:
+        if timings and f.timing not in timings:
             continue
         if stats and f.status not in stats:
+            continue
+        if not _theme_matches(f, themes):
             continue
         if not args.all and not stats and f.status in DEFAULT_HIDDEN:
             continue
@@ -101,8 +123,9 @@ def cmd_list(args) -> int:
     if args.json:
         print(json.dumps([_as_dict(f) for f in out], indent=None))
         return 0
+    tw = _theme_width(out)
     for f in out:
-        print(_row(f, args.width))
+        print(_row(f, args.width, tw))
     if not out:
         print("(no matching features)")
     return 0
@@ -116,7 +139,8 @@ def cmd_show(args) -> int:
         print(json.dumps(_as_dict(f), indent=None))
         return 0
     print(f"# {f.fid}: {f.name}")
-    print(f"status: {f.status}   category: {f.category}   file: {f.filename}")
+    theme = f"   theme: {f.theme}" if f.theme else ""
+    print(f"status: {f.status}   timing: {f.timing}{theme}   file: {f.filename}")
     extras = [n for n in (f.plan_file, f.research_file) if n]
     if extras:
         print(f"also: {', '.join(extras)}")
@@ -137,19 +161,23 @@ def cmd_show(args) -> int:
 
 def cmd_set(args) -> int:
     context_dir = _context_dir(args.dir)
-    if not args.status and not args.category:
-        _die("nothing to set — pass --status and/or --category")
+    if not args.status and not args.timing and args.theme is None:
+        _die("nothing to set — pass --status, --timing and/or --theme")
     _validate(_csv(args.status), STATUSES, "status")
-    _validate(_csv(args.category), CATEGORIES, "category")
+    _validate(_csv(args.timing), TIMINGS, "timing")
     features = load_features(context_dir, with_bodies=True)
     f = _find(features, args.fid)
-    before = (f.status, f.category)
+    before = (f.status, f.timing, f.theme)
     if args.status:
         f.set_status(args.status.strip().lower())
-    if args.category:
-        f.set_category(args.category.strip().lower())
-    if (f.status, f.category) == before:
-        print(f"{f.fid} unchanged ({f.status}, {f.category})")
+    if args.timing:
+        f.set_timing(args.timing.strip().lower())
+    if args.theme is not None:
+        # --theme "" and --theme none both clear it.
+        val = args.theme.strip()
+        f.set_theme("" if val.lower() in ("", "none", NO_THEME) else val)
+    if (f.status, f.timing, f.theme) == before:
+        print(f"{f.fid} unchanged ({f.timing}, {f.status}{', ' + f.theme if f.theme else ''})")
         return 0
     # Both files, always — the drift between them is the bug this command exists to kill.
     # Re-sort first so the table this writes is byte-identical to what the TUI
@@ -157,32 +185,63 @@ def cmd_set(args) -> int:
     sort_features(features)
     save_feature_file(context_dir, f)
     save_backlog_index(context_dir, features)
-    print(f"{f.fid} {before[1]}/{before[0]} -> {f.category}/{f.status}")
+    was_theme = f" [{before[2]}]" if before[2] else ""
+    now_theme = f" [{f.theme}]" if f.theme else ""
+    print(f"{f.fid} {before[1]}/{before[0]}{was_theme} -> {f.timing}/{f.status}{now_theme}")
     return 0
 
 
 def cmd_add(args) -> int:
     context_dir = _context_dir(args.dir)
     _validate(_csv(args.status), STATUSES, "status")
-    _validate(_csv(args.category), CATEGORIES, "category")
+    _validate(_csv(args.timing), TIMINGS, "timing")
     features = load_features(context_dir, with_bodies=True)
     fid = next_fid(features)
     filename = f"{fid}-{slugify(args.name)}.md"
     body = args.body.strip() if args.body else "_No description yet._"
-    feature = Feature(fid, args.name.strip(), args.category, args.status, filename,
-                      f"## Description\n{body}\n")
+    theme = (args.theme or "").strip()
+    if theme.lower() in ("none", NO_THEME):
+        theme = ""
+    feature = Feature(fid, args.name.strip(), args.timing, args.status, filename,
+                      f"## Description\n{body}\n", theme=theme)
     feature._backlog_pos = max((x._backlog_pos for x in features), default=-1) + 1
     features.append(feature)
     sort_features(features)
     save_feature_file(context_dir, feature)
     save_backlog_index(context_dir, features)
-    print(f"{fid} {feature.category}/{feature.status} {context_dir / filename}")
+    tag = f" [{feature.theme}]" if feature.theme else ""
+    print(f"{fid} {feature.timing}/{feature.status}{tag} {context_dir / filename}")
     return 0
 
 
 def cmd_next_id(args) -> int:
     context_dir = _context_dir(args.dir)
     print(next_fid(load_features(context_dir, with_bodies=False)))
+    return 0
+
+
+def cmd_themes(args) -> int:
+    context_dir = _context_dir(args.dir)
+    features = load_features(context_dir, with_bodies=False)
+    counts = theme_counts(features)
+    unthemed = sum(1 for f in features if not f.theme)
+    if args.json:
+        print(json.dumps({"themes": [{"theme": t, "count": c} for t, c in counts],
+                          "unthemed": unthemed}, indent=None))
+        return 0
+    for t, c in counts:
+        print(f"{c:>4}  {t}")
+    print(f"{unthemed:>4}  {NO_THEME}")
+    return 0
+
+
+def cmd_migrate(args) -> int:
+    context_dir = _context_dir(args.dir)
+    changed = migrate(context_dir, dry_run=args.dry_run)
+    for line in changed:
+        print(line)
+    verb = "would change" if args.dry_run else "changed"
+    print(f"\n{verb} {len(changed)} file(s)" if changed else "already on the current format")
     return 0
 
 
@@ -205,11 +264,15 @@ def cmd_check(args) -> int:
         header = _header_values(context_dir / f.filename)
         if header is None:
             continue
-        h_status, h_cat = header
+        h_status, h_timing, h_theme = header
         if h_status and h_status != f.status:
             problems.append(f"{f.fid}: status is '{f.status}' in backlog.md but '{h_status}' in {f.filename}")
-        if h_cat and h_cat != f.category:
-            problems.append(f"{f.fid}: category is '{f.category}' in backlog.md but '{h_cat}' in {f.filename}")
+        if h_timing and h_timing != f.timing:
+            problems.append(f"{f.fid}: timing is '{f.timing}' in backlog.md but '{h_timing}' in {f.filename}")
+        if h_theme.lower() != f.theme.lower():
+            a = f.theme or "(none)"
+            b = h_theme or "(none)"
+            problems.append(f"{f.fid}: theme is '{a}' in backlog.md but '{b}' in {f.filename}")
     dup = {fid for fid in table if table.count(fid) > 1}
     for fid in sorted(dup):
         problems.append(f"{fid}: appears {table.count(fid)} times in backlog.md")
@@ -219,18 +282,27 @@ def cmd_check(args) -> int:
     return 1 if problems else 0
 
 
-def _header_values(path: Path) -> tuple[str, str] | None:
-    """The **Status:** / **Category:** lines as written in a feature file."""
+def _header_values(path: Path) -> tuple[str, str, str] | None:
+    """The **Status:** / **Timing:** / **Theme:** lines as written in a feature file.
+
+    **Category:** is still read: that is the pre-1.8.0 spelling, and reporting it as
+    drift would flood `check` on any backlog that has not run `migrate`.
+    """
     if not path.exists():
         return None
-    status = category = ""
-    for line in path.read_text(encoding="utf-8").split("\n")[:20]:
-        s = line.strip().lower()
-        if s.startswith("**status:**"):
-            status = s.split("**status:**", 1)[1].strip()
-        elif s.startswith("**category:**"):
-            category = s.split("**category:**", 1)[1].strip()
-    return status, category
+    status = timing = theme = ""
+    for raw in path.read_text(encoding="utf-8").split("\n")[:20]:
+        s = raw.strip()
+        low = s.lower()
+        if low.startswith("**status:**"):
+            status = s[len("**status:**"):].strip().lower()
+        elif low.startswith("**timing:**"):
+            timing = s[len("**timing:**"):].strip().lower()
+        elif low.startswith("**category:**"):
+            timing = s[len("**category:**"):].strip().lower()
+        elif low.startswith("**theme:**"):
+            theme = s[len("**theme:**"):].strip()
+    return status, timing, theme
 
 
 # ── entry point ────────────────────────────────────────────────────────
@@ -242,24 +314,29 @@ Human (interactive):
   backlog --init [dir]               Scaffold a new backlog in dir
 
 Agent / script (non-interactive, compact output):
-  backlog list [-c now,next] [-s ready] [--all] [--json]
+  backlog list [-t now,next] [-s ready] [--theme NAME] [--all] [--json]
   backlog show FXX [--head] [--plan] [--research] [--json]
-  backlog set FXX [--status S] [--category C]
-  backlog add "Name" [--category C] [--status S] [--body TEXT]
+  backlog set FXX [--status S] [--timing T] [--theme NAME]
+  backlog add "Name" [--timing T] [--status S] [--theme NAME] [--body TEXT]
   backlog next-id
+  backlog themes [--json]            Themes in use, with counts
   backlog check                      Report table vs feature-file drift
+  backlog migrate [--dry-run]        Move a pre-1.9.0 backlog to Timing + Theme
 
   Every command takes --dir to point at a backlog other than ./context.
   list hides shipped and parked unless --all or an explicit --status.
+  --theme none lists the features that have no theme.
+  -c/--category still works everywhere -t/--timing does.
 
   backlog --version                  Print the installed version
   backlog --help                     Show this help
 
-Categories: %s
-Statuses:   %s
-""" % (", ".join(CATEGORIES), ", ".join(STATUSES))
+Timings:  %s
+Statuses: %s
+Themes:   free-form, created as you use them (see `backlog themes`)
+""" % (", ".join(TIMINGS), ", ".join(STATUSES))
 
-SUBCOMMANDS = {"list", "show", "set", "add", "next-id", "check"}
+SUBCOMMANDS = {"list", "show", "set", "add", "next-id", "check", "themes", "migrate"}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -271,7 +348,9 @@ def _parser() -> argparse.ArgumentParser:
         return p
 
     p = common(sub.add_parser("list", add_help=False))
-    p.add_argument("--category", "-c")
+    # --category/-c is the pre-1.8.0 name for the same option.
+    p.add_argument("--timing", "-t", "--category", "-c", dest="timing")
+    p.add_argument("--theme")
     p.add_argument("--status", "-s")
     p.add_argument("--all", action="store_true")
     p.add_argument("--json", action="store_true")
@@ -289,13 +368,15 @@ def _parser() -> argparse.ArgumentParser:
     p = common(sub.add_parser("set", add_help=False))
     p.add_argument("fid")
     p.add_argument("--status", "-s")
-    p.add_argument("--category", "-c")
+    p.add_argument("--timing", "-t", "--category", "-c", dest="timing")
+    p.add_argument("--theme", default=None, help='name, or "" / none to clear')
     p.set_defaults(func=cmd_set)
 
     p = common(sub.add_parser("add", add_help=False))
     p.add_argument("name")
-    p.add_argument("--category", "-c", default="later")
+    p.add_argument("--timing", "-t", "--category", "-c", dest="timing", default="later")
     p.add_argument("--status", "-s", default="idea")
+    p.add_argument("--theme")
     p.add_argument("--body", "-b")
     p.set_defaults(func=cmd_add)
 
@@ -304,6 +385,14 @@ def _parser() -> argparse.ArgumentParser:
 
     p = common(sub.add_parser("check", add_help=False))
     p.set_defaults(func=cmd_check)
+
+    p = common(sub.add_parser("themes", add_help=False))
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_themes)
+
+    p = common(sub.add_parser("migrate", add_help=False))
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_migrate)
     return ap
 
 

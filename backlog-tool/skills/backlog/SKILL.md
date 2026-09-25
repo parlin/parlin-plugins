@@ -11,12 +11,16 @@ allowed-tools: Read, Grep, Edit, Write, Bash, Glob
 
 A feature backlog stored as markdown in a project's `context/` directory:
 
-- **`context/backlog.md`** owns **ordering, status and category** (one table row per feature).
+- **`context/backlog.md`** owns **ordering, theme, timing and status** (one table row per feature).
 - **`context/FXX-slug.md`** owns the **name and description**. Optional siblings:
   `FXX-slug-plan.md`, `FXX-slug-research.md`.
 
-Both files carry status and category, so **every change writes both**. Use `backlog set`,
+Both files carry theme, timing and status, so **every change writes both**. Use `backlog set`,
 which does that in one step - hand-editing two files is where they drift apart.
+
+**Timing was called Category before 1.9.0.** Files now write `**Timing:**` and the table has a
+`Timing` column; the old spelling is still read and `-c/--category` still works. `backlog migrate`
+converts an old backlog in place.
 
 ## Use the commands, not full-file reads
 
@@ -25,17 +29,21 @@ The `backlog` command answers questions compactly. A backlog can hold 170+ featu
 
 ```bash
 backlog list                      # all but shipped/parked, one line each
-backlog list -c now,next          # by category
+backlog list -t now,next          # by timing
 backlog list -s ready,to-review   # by status (an explicit --status shows shipped too)
+backlog list --theme moments      # by theme; --theme none for the unthemed
 backlog list --json               # for scripting
 backlog show F145                 # header + description
 backlog show F145 --head          # header only
 backlog show F145 --plan          # add the plan file (these get large - ask for them)
 backlog set F145 -s shipped       # updates the table row AND the feature header
-backlog set F145 -c now -s ready
-backlog add "Name" -c next -s ready -b "One-line description."
+backlog set F145 -t now -s ready
+backlog set F145 --theme moments  # '' or none clears it
+backlog add "Name" -t next -s ready --theme moments -b "One-line description."
 backlog next-id                   # lowest free FXX
+backlog themes                    # themes in use, with counts
 backlog check                     # report drift between table and feature files
+backlog migrate                   # move a pre-1.9.0 backlog to Timing + Theme
 ```
 
 Every command takes `-d <dir>` for a backlog outside `./context`. Run from the project root.
@@ -56,12 +64,16 @@ scope and decisions; move long research into `FXX-slug-research.md` and step-by-
 into `FXX-slug-plan.md`. When reading a file over ~200 lines, grep for the section you need
 or read an offset - not the whole thing.
 
-## Statuses and categories
+## Statuses, timings and themes
 
 `idea` → `research-needed` → `researching` → `research-done` → `ready` → `in-progress`
 → `to-review` → `shipped`, plus `parked`.
 
-`now` (shipped or in flight) · `next` (up next) · `later` (planned) · `maybe` (uncommitted).
+Timing: `now` (shipped or in flight) · `next` (up next) · `later` (planned) · `maybe` (uncommitted).
+
+A **theme** groups related features the way an epic does. Zero or one per feature, free-form,
+and never declared anywhere - a theme exists because a feature uses it. Check `backlog themes`
+before inventing a name, and reuse an existing spelling rather than adding a case variant.
 
 ## Feature file format
 
@@ -69,15 +81,18 @@ or read an offset - not the whole thing.
 # FXX: Feature Name
 
 **Status:** ready
-**Category:** next
+**Timing:** next
+**Theme:** moments
 
 ## Description
 What it does and why it matters.
 ```
 
+The `**Theme:**` line is omitted entirely when the feature has no theme.
+
 ## Other operations
 
-- **Reorder:** row position in `backlog.md` defines order within a category. Move the row;
+- **Reorder:** row position in `backlog.md` defines order within a timing group. Move the row;
   never rename files to reorder.
 - **Launch the TUI** (interactive, for the user - not for an agent): `backlog`, after
   running `ensure-installed.sh` above. A standalone-script project may use

@@ -45,7 +45,7 @@ FEATURE_WITH_EXTRAS = """\
 # F07: A feature with structure
 
 **Status:** ready
-**Category:** next
+**Timing:** next
 
 ## Description
 First paragraph, with a `backtick` and an - hyphen.
@@ -80,24 +80,41 @@ class BacklogTestCase(unittest.TestCase):
         (self.ctx / filename).write_text(text, encoding="utf-8")
 
     def table_rows(self) -> dict[str, tuple[str, str]]:
-        """{FID: (category, status)} as backlog.md states it."""
+        """{FID: (timing, status)} as backlog.md states it — via the shipped parser,
+        so these tests do not hard-code column positions."""
         rows = {}
         for line in (self.ctx / "backlog.md").read_text(encoding="utf-8").split("\n"):
-            cells = [c.strip() for c in line.strip().split("|")]
-            if len(cells) >= 6 and cells[1].upper().startswith("F") and cells[1][1:].isdigit():
-                rows[cells[1].upper()] = (cells[3], cells[4])
+            row = model.parse_table_row(line)
+            if row:
+                rows[row["fid"]] = (row["timing"], row["status"])
         return rows
 
+    def table_themes(self) -> dict[str, str]:
+        themes = {}
+        for line in (self.ctx / "backlog.md").read_text(encoding="utf-8").split("\n"):
+            row = model.parse_table_row(line)
+            if row:
+                themes[row["fid"]] = row["theme"]
+        return themes
+
     def header_of(self, filename: str) -> tuple[str, str]:
-        """(category, status) as the feature file's own header states it."""
-        status = category = ""
+        """(timing, status) as the feature file's own header states it."""
+        status = timing = ""
         for line in (self.ctx / filename).read_text(encoding="utf-8").split("\n"):
             s = line.strip().lower()
             if s.startswith("**status:**"):
                 status = s.split("**status:**", 1)[1].strip()
+            elif s.startswith("**timing:**"):
+                timing = s.split("**timing:**", 1)[1].strip()
             elif s.startswith("**category:**"):
-                category = s.split("**category:**", 1)[1].strip()
-        return category, status
+                timing = s.split("**category:**", 1)[1].strip()
+        return timing, status
+
+    def theme_header_of(self, filename: str) -> str:
+        for line in (self.ctx / filename).read_text(encoding="utf-8").split("\n"):
+            if line.strip().lower().startswith("**theme:**"):
+                return line.strip()[len("**Theme:**"):].strip()
+        return ""
 
 
 # ── the data layer ─────────────────────────────────────────────────────
@@ -187,7 +204,8 @@ class ListCommand(BacklogTestCase):
         _, out, _ = run("list", "--json", "-d", str(self.ctx))
         rows = json.loads(out)
         self.assertTrue(rows)
-        self.assertEqual(set(rows[0]), {"fid", "name", "category", "status", "file", "plan", "research"})
+        self.assertEqual(set(rows[0]),
+                         {"fid", "name", "theme", "timing", "status", "file", "plan", "research"})
 
     def test_unknown_filter_value_fails_loudly(self):
         code, _, err = run("list", "-s", "nearly-done", "-d", str(self.ctx))
@@ -285,10 +303,10 @@ class AddCommand(BacklogTestCase):
         run("add", "Someday", "-d", str(self.ctx))
         self.assertEqual(self.table_rows()["F02"], ("later", "idea"))
 
-    def test_invalid_category_creates_nothing(self):
-        code, _, err = run("add", "Bad", "-c", "urgent", "-d", str(self.ctx))
+    def test_invalid_timing_creates_nothing(self):
+        code, _, err = run("add", "Bad", "-t", "urgent", "-d", str(self.ctx))
         self.assertEqual(code, 1)
-        self.assertIn("unknown category", err)
+        self.assertIn("unknown timing", err)
         self.assertEqual(list(self.ctx.glob("F02-*.md")), [])
 
     def test_added_features_keep_getting_distinct_ids(self):
@@ -343,6 +361,168 @@ class CheckCommand(BacklogTestCase):
         before = (self.ctx / "backlog.md").read_bytes()
         run("check", "-d", str(self.ctx))
         self.assertEqual(before, (self.ctx / "backlog.md").read_bytes())
+
+
+class Themes(BacklogTestCase):
+    """A theme is optional, free-form, and lives in both files like timing does."""
+
+    def test_add_with_a_theme_writes_both_files(self):
+        run("add", "Prefetch", "-t", "next", "--theme", "moments", "-d", str(self.ctx))
+        self.assertEqual(self.table_themes()["F02"], "moments")
+        self.assertEqual(self.theme_header_of("F02-prefetch.md"), "moments")
+
+    def test_unthemed_file_has_no_theme_line(self):
+        run("add", "Plain", "-d", str(self.ctx))
+        text = (self.ctx / "F02-plain.md").read_text(encoding="utf-8")
+        self.assertNotIn("**Theme:**", text)
+
+    def test_set_assigns_and_clears(self):
+        run("set", "F01", "--theme", "watch", "-d", str(self.ctx))
+        self.assertEqual(self.table_themes()["F01"], "watch")
+        run("set", "F01", "--theme", "", "-d", str(self.ctx))
+        self.assertEqual(self.table_themes()["F01"], "")
+        self.assertEqual(self.theme_header_of("F01-example-feature.md"), "")
+
+    def test_none_also_clears(self):
+        run("set", "F01", "--theme", "watch", "-d", str(self.ctx))
+        run("set", "F01", "--theme", "none", "-d", str(self.ctx))
+        self.assertEqual(self.table_themes()["F01"], "")
+
+    def test_list_filters_by_theme(self):
+        run("add", "A", "--theme", "moments", "-d", str(self.ctx))
+        run("add", "B", "--theme", "watch", "-d", str(self.ctx))
+        _, out, _ = run("list", "--theme", "moments", "-d", str(self.ctx))
+        self.assertIn("F02", out)
+        self.assertNotIn("F03", out)
+
+    def test_theme_none_lists_the_unthemed(self):
+        run("add", "Themed", "--theme", "moments", "-d", str(self.ctx))
+        _, out, _ = run("list", "--theme", "none", "-d", str(self.ctx))
+        self.assertIn("F01", out)          # the scaffolded sample has no theme
+        self.assertNotIn("F02", out)
+
+    def test_themes_command_counts(self):
+        run("add", "A", "--theme", "moments", "-d", str(self.ctx))
+        run("add", "B", "--theme", "moments", "-d", str(self.ctx))
+        run("add", "C", "--theme", "watch", "-d", str(self.ctx))
+        _, out, _ = run("themes", "-d", str(self.ctx))
+        self.assertRegex(out, r"2\s+moments")
+        self.assertRegex(out, r"1\s+watch")
+        self.assertRegex(out, r"1\s+\(none\)")
+
+    def test_themes_are_deduplicated_case_insensitively(self):
+        run("add", "A", "--theme", "Moments", "-d", str(self.ctx))
+        run("add", "B", "--theme", "moments", "-d", str(self.ctx))
+        feats = model.load_features(self.ctx, with_bodies=False)
+        self.assertEqual(len(model.themes_in_use(feats)), 1)
+
+    def test_a_theme_with_spaces_survives_the_table(self):
+        run("add", "A", "--theme", "watch app", "-d", str(self.ctx))
+        self.assertEqual(self.table_themes()["F02"], "watch app")
+        feats = {f.fid: f for f in model.load_features(self.ctx, with_bodies=False)}
+        self.assertEqual(feats["F02"].theme, "watch app")
+
+
+class BackwardCompatibility(BacklogTestCase):
+    """A 1.7.0 backlog must keep working untouched — other people have these on disk."""
+
+    OLD_TABLE = """# Old Backlog
+
+| # | Feature | Category | Status | File |
+|---|---|---|---|---|
+| F01 | Example Feature | now | ready | `F01-example-feature.md` |
+| F02 | Second | later | idea | `F02-second.md` |
+"""
+    OLD_FEATURE = """# F02: Second
+
+**Status:** idea
+**Category:** later
+
+## Description
+Written by 1.7.0.
+"""
+
+    def setUp(self):
+        super().setUp()
+        (self.ctx / "backlog.md").write_text(self.OLD_TABLE, encoding="utf-8")
+        self.write_feature("F02-second.md", self.OLD_FEATURE)
+
+    def test_old_five_column_table_still_parses(self):
+        feats = {f.fid: f for f in model.load_features(self.ctx, with_bodies=False)}
+        self.assertEqual((feats["F01"].timing, feats["F01"].status), ("now", "ready"))
+        self.assertEqual((feats["F02"].timing, feats["F02"].status), ("later", "idea"))
+        self.assertEqual(feats["F02"].theme, "")
+
+    def test_old_category_header_is_read_as_timing(self):
+        f = model.parse_feature_file(self.ctx / "F02-second.md")
+        self.assertEqual(f.timing, "later")
+
+    def test_category_flag_is_still_accepted(self):
+        code, _, err = run("set", "F02", "-c", "now", "-d", str(self.ctx))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.table_rows()["F02"][0], "now")
+
+    def test_category_attribute_still_reads_and_writes(self):
+        f = model.Feature("F09", "X", "next", "idea", "F09-x.md", "")
+        self.assertEqual(f.category, "next")
+        f.category = "later"
+        self.assertEqual(f.timing, "later")
+
+    def test_a_pipe_in_a_name_does_not_shift_timing_or_status(self):
+        """Why the row parser works from the right, not from fixed positions.
+
+        An unescaped pipe in a feature name must not be able to corrupt the two
+        fields the loader acts on. It can still cost the theme on an old-layout
+        row, which is asserted below so the limit is recorded rather than assumed.
+        """
+        row = model.parse_table_row("| F07 | Rename a | b file | moments | next | ready | `F07-x.md` |")
+        self.assertEqual((row["fid"], row["timing"], row["status"]), ("F07", "next", "ready"))
+        self.assertEqual(row["theme"], "moments")
+
+        old = model.parse_table_row("| F08 | Pipe | in old | now | shipped | `F08-o.md` |")
+        self.assertEqual((old["timing"], old["status"]), ("now", "shipped"))
+        self.assertEqual(old["theme"], "in old")   # known limit, not a promise
+
+    def test_a_short_or_malformed_row_is_ignored(self):
+        self.assertIsNone(model.parse_table_row("| F09 | Odd | weird-status | `F09.md` |"))
+        self.assertIsNone(model.parse_table_row("not a row"))
+        self.assertIsNone(model.parse_table_row("|---|---|---|---|---|"))
+
+
+class Migration(BacklogTestCase):
+
+    def setUp(self):
+        super().setUp()
+        (self.ctx / "backlog.md").write_text(BackwardCompatibility.OLD_TABLE, encoding="utf-8")
+        self.write_feature("F02-second.md", BackwardCompatibility.OLD_FEATURE)
+
+    def test_migrate_rewrites_both_spellings(self):
+        code, out, _ = run("migrate", "-d", str(self.ctx))
+        self.assertEqual(code, 0)
+        self.assertIn("F02-second.md", out)
+        self.assertIn("**Timing:** later", (self.ctx / "F02-second.md").read_text(encoding="utf-8"))
+        self.assertNotIn("**Category:**", (self.ctx / "F02-second.md").read_text(encoding="utf-8"))
+        self.assertIn("| # | Feature | Theme | Timing | Status | File |",
+                      (self.ctx / "backlog.md").read_text(encoding="utf-8"))
+
+    def test_migrate_is_idempotent(self):
+        run("migrate", "-d", str(self.ctx))
+        after = (self.ctx / "backlog.md").read_bytes()
+        code, out, _ = run("migrate", "-d", str(self.ctx))
+        self.assertEqual(code, 0)
+        self.assertIn("already on the current format", out)
+        self.assertEqual(after, (self.ctx / "backlog.md").read_bytes())
+
+    def test_dry_run_changes_nothing(self):
+        before = (self.ctx / "F02-second.md").read_bytes()
+        _, out, _ = run("migrate", "--dry-run", "-d", str(self.ctx))
+        self.assertIn("would change", out)
+        self.assertEqual(before, (self.ctx / "F02-second.md").read_bytes())
+
+    def test_migrate_preserves_timing_and_status(self):
+        run("migrate", "-d", str(self.ctx))
+        self.assertEqual(self.table_rows()["F01"], ("now", "ready"))
+        self.assertEqual(self.table_rows()["F02"], ("later", "idea"))
 
 
 class MissingDirectory(unittest.TestCase):
@@ -457,23 +637,23 @@ class TuiActuallyRuns(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(before, (ctx / "backlog.md").read_bytes(),
                                  "a save with no edits must not touch the file")
 
-    async def test_category_filter(self):
+    async def test_timing_filter(self):
         with TemporaryDirectory() as tmp:
             ctx = Path(tmp) / "context"
             run("--init", str(ctx))
             run("add", "Soon", "-c", "now", "-d", str(ctx))
             run("add", "Someday", "-c", "later", "-d", str(ctx))
-            from backlog_tool.tui import BacklogApp, CategoryFilterScreen
+            from backlog_tool.tui import BacklogApp, ColumnFilterScreen
             app = BacklogApp(ctx)
-            shown = lambda: {f.category for f in app.display_rows if f is not None}
+            shown = lambda: {f.timing for f in app.display_rows if f is not None}
             before = (ctx / "backlog.md").read_bytes()
             async with app.run_test() as pilot:
                 self.assertEqual(shown(), {"now", "next", "later"})
-                await pilot.press("right", "right", "up")   # onto the Cat. header
-                self.assertTrue(app._header_focused)
+                await pilot.press("right", "right", "right", "up")   # onto the Timing header
+                self.assertEqual(app._header_focused_col, "timing")
                 await pilot.press("enter")
                 await pilot.pause()
-                self.assertIsInstance(app.screen, CategoryFilterScreen)
+                self.assertIsInstance(app.screen, ColumnFilterScreen)
                 await pilot.press("space", "down", "space", "enter")  # All off, "now" on
                 await pilot.pause()
                 self.assertEqual(shown(), {"now"})
@@ -486,6 +666,165 @@ class TuiActuallyRuns(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
             self.assertEqual(before, (ctx / "backlog.md").read_bytes(),
                              "the filter is view state and must not touch the files")
+
+
+    async def test_theme_column_widens_for_a_long_theme(self):
+        with TemporaryDirectory() as tmp:
+            ctx = Path(tmp) / "context"
+            run("--init", str(ctx))
+            run("add", "Long", "--theme", "sync & conflicts", "-d", str(ctx))
+            from backlog_tool.tui import BacklogApp
+            app = BacklogApp(ctx)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                width = next(c.width for c in app.query_one("#feature-table").columns.values()
+                             if c.label.plain.startswith("Theme"))
+                self.assertGreater(width, len("sync & conflicts"),
+                                   "a theme must not be truncated in its own column")
+
+    async def test_theme_filter_hides_the_unthemed(self):
+        with TemporaryDirectory() as tmp:
+            ctx = Path(tmp) / "context"
+            run("--init", str(ctx))
+            run("add", "Themed", "-t", "now", "--theme", "moments", "-d", str(ctx))
+            from backlog_tool.tui import BacklogApp, ColumnFilterScreen
+            app = BacklogApp(ctx)
+            before = (ctx / "backlog.md").read_bytes()
+            async with app.run_test() as pilot:
+                themes = lambda: {f.theme for f in app.display_rows if f is not None}
+                self.assertEqual(themes(), {"", "moments"})
+                await pilot.press("right", "right", "up")        # onto the Theme header
+                self.assertEqual(app._header_focused_col, "theme")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ColumnFilterScreen)
+                # All off, then the first real value on — "moments" sorts before "(none)"
+                await pilot.press("space", "down", "space", "enter")
+                await pilot.pause()
+                self.assertEqual(themes(), {"moments"})
+            self.assertEqual(before, (ctx / "backlog.md").read_bytes(),
+                             "a filter is view state and must not touch the files")
+
+    async def test_status_filter_is_reachable_from_its_header(self):
+        with TemporaryDirectory() as tmp:
+            ctx = Path(tmp) / "context"
+            run("--init", str(ctx))
+            run("add", "Ready thing", "-t", "now", "-s", "ready", "-d", str(ctx))
+            from backlog_tool.tui import BacklogApp, ColumnFilterScreen
+            app = BacklogApp(ctx)
+            async with app.run_test() as pilot:
+                await pilot.press("right", "right", "right", "right", "up")
+                self.assertEqual(app._header_focused_col, "status")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ColumnFilterScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertEqual(app._hidden["status"], set(), "cancel must not filter")
+
+    async def test_f_filters_the_column_the_cursor_is_in(self):
+        with TemporaryDirectory() as tmp:
+            ctx = Path(tmp) / "context"
+            run("--init", str(ctx))
+            from backlog_tool.tui import BacklogApp, ColumnFilterScreen
+            app = BacklogApp(ctx)
+            async with app.run_test() as pilot:
+                await pilot.press("right", "right")              # Theme column
+                await pilot.press("f")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ColumnFilterScreen)
+                self.assertIn("theme", app.screen._title.lower())
+                await pilot.press("escape")
+                await pilot.pause()
+                await pilot.press("right")                        # Timing column
+                await pilot.press("f")
+                await pilot.pause()
+                self.assertIn("timing", app.screen._title.lower())
+
+    async def test_theme_picker_assigns_and_can_create(self):
+        """The Theme cell opens a picker of themes in use, plus a way to make a new one."""
+        with TemporaryDirectory() as tmp:
+            ctx = Path(tmp) / "context"
+            run("--init", str(ctx))
+            run("add", "Has theme", "-t", "now", "--theme", "moments", "-d", str(ctx))
+            from backlog_tool.tui import BacklogApp, NewThemeScreen, ValuePickerScreen
+            app = BacklogApp(ctx)
+
+            async def open_theme_picker(feature):
+                app._move_cursor_to(feature)
+                table = app.query_one("#feature-table")
+                table.move_cursor(row=table.cursor_row, column=2)   # the Theme column
+                await pilot.press("enter")
+                await pilot.pause()
+                assert isinstance(app.screen, ValuePickerScreen), type(app.screen).__name__
+                return app.screen.query_one("#picker-list")
+
+            async def highlight(ol, wanted):
+                """Walk to an option by id, rather than trusting a keypress count."""
+                for _ in range(len(app.screen._options) + 1):
+                    if ol.get_option_at_index(ol.highlighted).id == wanted:
+                        return
+                    await pilot.press("down")
+                    await pilot.pause()
+                raise AssertionError(f"{wanted!r} not reachable")
+
+            async with app.run_test() as pilot:
+                target = next(f for f in app.features if not f.theme)
+
+                # 1. assign an existing theme
+                ol = await open_theme_picker(target)
+                # ValuePickerScreen keeps its options as plain strings
+                self.assertEqual(app.screen._options[0], model.NO_THEME)
+                self.assertIn("moments", app.screen._options)
+                self.assertEqual(app.screen._options[-1], app.NEW_THEME_OPTION)
+                await highlight(ol, "moments")
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.pause()
+                self.assertEqual(target.theme, "moments")
+                self.assertTrue(target.dirty, "an assigned theme is an unsaved edit")
+
+                # 2. create one that does not exist yet
+                ol = await open_theme_picker(target)
+                await highlight(ol, app.NEW_THEME_OPTION)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, NewThemeScreen)
+                for ch in "watch":
+                    await pilot.press(ch)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.pause()
+                self.assertEqual(target.theme, "watch")
+
+                # 3. clearing it back to none
+                ol = await open_theme_picker(target)
+                await highlight(ol, model.NO_THEME)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.pause()
+                self.assertEqual(target.theme, "")
+
+    async def test_a_new_theme_reuses_an_existing_spelling(self):
+        """Typing "Moments" when "moments" exists must not create a case-variant twin."""
+        with TemporaryDirectory() as tmp:
+            ctx = Path(tmp) / "context"
+            run("--init", str(ctx))
+            run("add", "One", "-t", "now", "--theme", "moments", "-d", str(ctx))
+            run("add", "Two", "-t", "now", "-d", str(ctx))
+            from backlog_tool.tui import BacklogApp
+            app = BacklogApp(ctx)
+            async with app.run_test() as pilot:
+                target = next(f for f in app.features if not f.theme)
+                applied = []
+                app._prompt_new_theme(target, applied.append)
+                await pilot.pause()
+                for ch in "Moments":
+                    await pilot.press(ch)
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(applied, ["moments"])
 
 
 if __name__ == "__main__":

@@ -36,9 +36,13 @@ project, so they can stay in the terminal instead of switching to another app.
   to AI agents, so the files *are* the integration surface - no API needed. Keep
   backlogs greppable, diffable, and versioned next to the code.
 - **Two front ends, one data layer.** The TUI is for the human; the subcommands
-  (`list`/`show`/`set`/`add`/`next-id`/`check`) are for agents and scripts. Both write through
-  `model.py`, so neither can invent its own file format. Add behavior to the model, not to one
-  front end.
+  (`list`/`show`/`set`/`add`/`next-id`/`themes`/`check`/`migrate`) are for agents and scripts.
+  Both write through `model.py`, so neither can invent its own file format. Add behavior to the
+  model, not to one front end.
+- **Three axes, deliberately different in kind.** *Timing* (now/next/later/maybe) and *status*
+  are closed vocabularies the tool validates. A *theme* is free-form and undeclared - it exists
+  because a feature uses it, which is why the picker offers "new theme…" and folds case variants
+  into the existing spelling. Don't add a themes registry; one source of truth is the point.
 - **Arrow keys or mouse.** Both navigation modes are supported; don't regress either.
 - **Shortcuts for everything** - keyboard-first, documented in the plugin README.
 
@@ -55,6 +59,11 @@ project, so they can stay in the terminal instead of switching to another app.
   also the dir the backlog skill scaffolds, so don't run `backlog --init` here and
   expect tracked output.
 - Author name is `Par Lindhe` in all manifests. Keep new plugins consistent.
+- **Old backlogs must keep loading.** `Timing` was `Category` until 1.9.0, and other people have
+  1.7-era backlogs on disk from the marketplace. `**Category:**` is still read, the five-column
+  table still parses, `-c/--category` is still accepted, and `backlog migrate` converts in place.
+  `parse_table_row` reads the row **from the right** (File, Status, Timing) because those fields
+  have closed vocabularies - a pipe in a feature name cannot shift them. Test both layouts.
 - **backlog-tool has tests; the other plugins do not.** Run them before shipping a change to
   it: `cd backlog-tool && python3 -m unittest discover -s tests -t .` (stdlib unittest, no
   dependencies; the TUI cases skip themselves when Textual is missing). No linter, no CI -
