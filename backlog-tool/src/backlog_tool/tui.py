@@ -296,7 +296,7 @@ class CategoryFilterScreen(ModalScreen):
                 options.append(Selection(f"[{color}]{cat}[/]", cat, cat in self._visible))
             yield SelectionList[str](*options, id="filter-list")
             with Horizontal(id="filter-buttons"):
-                yield Button("Apply", id="filter-apply", variant="primary")
+                yield Button("Apply ⏎", id="filter-apply", variant="primary")
                 yield Button("Cancel", id="filter-cancel")
 
     def on_mount(self):
