@@ -93,6 +93,9 @@ COL_TITLES = {"theme": "Theme", "timing": "Timing", "status": "Status"}
 # The Theme column sizes itself to the longest theme in use: themes are user-invented,
 # so a fixed width either truncates "sync & conflicts" or wastes space on "ux".
 THEME_COL_MIN, THEME_COL_MAX = 8, 22
+# The Feature column takes whatever width the other columns leave, so widening the
+# list pane shows more of each title instead of empty space after Status.
+FEATURE_COL_MIN = 30  # the old fixed width: never show less than before
 
 TIMING_COLORS = {
     "now":   "#22c55e",
@@ -865,12 +868,23 @@ class DetailPane(Widget):
             body_md.update(content)
 
 
+# ── Feature table ──────────────────────────────────────────────────────
+
+class FeatureTable(DataTable):
+    """The backlog list. Refits the Feature column whenever its own width changes:
+    a pane resize, a terminal resize, or the first layout after mount."""
+
+    def on_resize(self, event):
+        self.app._fit_name_column()
+
+
 # ── Main app ───────────────────────────────────────────────────────────
 
 class BacklogApp(App):
     # Pane width ratios: (left%, right%) — cycled with [ and ]
     PANE_RATIOS = [(20, 80), (30, 70), (40, 60), (50, 50), (60, 40), (70, 30)]
     DEFAULT_RATIO_IDX = 2  # 40:60
+    LIST_FOCUS_RATIO_IDX = 5  # 70:30 — toggled with z, for reading long titles
 
     CSS = """
     Screen { layout: horizontal; }
@@ -928,8 +942,9 @@ class BacklogApp(App):
         Binding("ctrl+s", "save", "Save", priority=True, show=False),
         Binding("ctrl+r", "restart", "Restart", priority=True),
         Binding("q", "quit_app", "Quit"),
-        Binding("[", "pane_ratio_left", "← Pane", show=False),
-        Binding("]", "pane_ratio_right", "Pane →", show=False),
+        Binding("[", "pane_ratio_left", "List ◀"),
+        Binding("]", "pane_ratio_right", "List ▶"),
+        Binding("z", "toggle_list_focus", "Wide list"),
         Binding("escape", "stop_edit", "Back to list", show=False),
         Binding("tab", "focus_next", "Tab focus", show=False),
     ]
@@ -957,6 +972,7 @@ class BacklogApp(App):
         self._script_mtime: float = self._script_path.stat().st_mtime
         self._update_available: bool = False
         self._ratio_idx: int = self.DEFAULT_RATIO_IDX
+        self._ratio_before_focus: int = self.DEFAULT_RATIO_IDX  # where z returns to
         self._claude_pane_id: str | None = None
         self._fs_pending: bool = False  # disk changed while local edits were unsaved
         # Agent sessions (detached tmux, mirrored read-only — see F01 plan)
@@ -1009,10 +1025,10 @@ class BacklogApp(App):
         yield Header()
         with Horizontal():
             with Vertical(id="left-pane"):
-                yield DataTable(id="feature-table")
+                yield FeatureTable(id="feature-table")
             yield DetailPane(id="detail-pane")
         yield Static("", id="update-bar")
-        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  f filter col  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  i impl  │  s save  │  \\[/] resize", id="status-bar")
+        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  f filter col  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  i impl  │  s save  │  \\[/] resize  z wide list", id="status-bar")
         yield Footer()
 
     def on_mount(self):
@@ -1024,7 +1040,7 @@ class BacklogApp(App):
         table.cursor_type = "cell"
         table.zebra_stripes = False
         table.add_column("#", key="fid", width=5)
-        table.add_column("Feature", key="name", width=30)
+        table.add_column("Feature", key="name", width=FEATURE_COL_MIN)
         table.add_column("Theme ▾", key="theme", width=THEME_COL_MIN)
         table.add_column("Timing", key="timing", width=8)
         table.add_column("Status", key="status", width=12)
@@ -1045,9 +1061,29 @@ class BacklogApp(App):
                 table._update_dimensions([key])
                 break
 
+    def _fit_name_column(self):
+        """Give the Feature column the width the other columns leave free."""
+        table = self.query_one("#feature-table", DataTable)
+        if not table.size.width:
+            return  # not laid out yet; on_resize calls again once it is
+        # The vertical scrollbar is reserved even when absent, so the width does not
+        # jump as rows come and go.
+        free = table.size.width - table.styles.scrollbar_size_vertical
+        for key, column in table.columns.items():
+            if key.value != "name":
+                free -= column.get_render_width(table)
+        want = max(FEATURE_COL_MIN, free - 2 * table.cell_padding)
+        for key, column in table.columns.items():
+            if key.value == "name" and column.width != want:
+                column.width = want
+                table._update_dimensions([key])
+                table.refresh()
+                break
+
     def _refresh_table(self, preserve_cursor: bool = False):
         table = self.query_one("#feature-table", DataTable)
         self._fit_theme_column()
+        self._fit_name_column()
         old_row = table.cursor_row if preserve_cursor else -1
         old_col = table.cursor_column if preserve_cursor else 0
         table.clear()
@@ -2187,7 +2223,7 @@ class BacklogApp(App):
         left, right = self.PANE_RATIOS[self._ratio_idx]
         pane = self.query_one("#left-pane", Vertical)
         pane.styles.width = f"{left}%"
-        self._set_status(f"Pane ratio {left}:{right}  —  \\[[]  \\[]] to adjust")
+        self._set_status(f"Pane ratio {left}:{right}  —  \\[[]  \\[]] to adjust, \\[z] wide list")
 
     def action_pane_ratio_left(self):
         if self.editing:
@@ -2202,6 +2238,17 @@ class BacklogApp(App):
         if self._ratio_idx < len(self.PANE_RATIOS) - 1:
             self._ratio_idx += 1
             self._apply_pane_ratio()
+
+    def action_toggle_list_focus(self):
+        """Jump to a wide list for reading titles; press again to go back."""
+        if self.editing:
+            return
+        if self._ratio_idx == self.LIST_FOCUS_RATIO_IDX:
+            self._ratio_idx = self._ratio_before_focus
+        else:
+            self._ratio_before_focus = self._ratio_idx
+            self._ratio_idx = self.LIST_FOCUS_RATIO_IDX
+        self._apply_pane_ratio()
 
 
 if __name__ == "__main__":

@@ -682,6 +682,32 @@ class TuiActuallyRuns(unittest.IsolatedAsyncioTestCase):
                 self.assertGreater(width, len("sync & conflicts"),
                                    "a theme must not be truncated in its own column")
 
+    async def test_feature_column_grows_with_the_list_pane(self):
+        with TemporaryDirectory() as tmp:
+            ctx = Path(tmp) / "context"
+            run("--init", str(ctx))
+            from backlog_tool.tui import BacklogApp, FEATURE_COL_MIN
+            app = BacklogApp(ctx)
+            async with app.run_test(size=(200, 40)) as pilot:
+                await pilot.pause()
+                table = app.query_one("#feature-table")
+                name_width = lambda: next(c.width for k, c in table.columns.items()
+                                          if k.value == "name")
+                used = lambda: sum(c.get_render_width(table) for c in table.columns.values())
+                start = name_width()
+                self.assertLessEqual(used(), table.size.width,
+                                     "the columns must fit the pane without sideways scroll")
+                await pilot.press("z")                     # wide list
+                await pilot.pause()
+                self.assertGreater(name_width(), start, "a wider pane must show more title")
+                self.assertLessEqual(used(), table.size.width)
+                await pilot.press("z")                     # and back
+                await pilot.pause()
+                self.assertEqual(name_width(), start)
+                await pilot.press("[", "[", "[")           # past the narrowest step
+                await pilot.pause()
+                self.assertGreaterEqual(name_width(), FEATURE_COL_MIN, "the Feature column has a floor")
+
     async def test_theme_filter_hides_the_unthemed(self):
         with TemporaryDirectory() as tmp:
             ctx = Path(tmp) / "context"
