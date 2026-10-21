@@ -835,7 +835,7 @@ class DetailPane(Widget):
 
         cc = TIMING_COLORS.get(feature.timing, "white")
         sc = STATUS_COLORS.get(feature.status, "white")
-        meta.update(f"Category: [{cc}]{feature.timing}[/]  Status: [{sc}]{feature.status}[/]  File: {feature.filename}")
+        meta.update(f"Timing: [{cc}]{feature.timing}[/]  Status: [{sc}]{feature.status}[/]  File: {feature.filename}")
 
         # Agent tab: live terminal mirror \u2014 no editor, no markdown.
         if active_tab == "agent":
