@@ -357,6 +357,20 @@ class CheckCommand(BacklogTestCase):
         self.assertEqual(code, 1)
         self.assertIn("no row in backlog.md", out)
 
+    def test_a_second_file_with_the_same_id_is_reported_not_loaded(self):
+        """A companion doc such as F01-0-notes.md must not become a second F01: two
+        features with one ID crashed the TUI with DuplicateKey (camthis F235, 2026-10-26).
+        The file the table row names wins, even though the companion sorts first."""
+        real = next(f for f in model.load_features(self.ctx, with_bodies=False) if f.fid == "F01")
+        self.write_feature("F01-0-notes.md", "# F01: Notes about F01\n\nfree text\n")
+        warnings = []
+        features = model.load_features(self.ctx, with_bodies=False, warn=warnings.append)
+        self.assertEqual([f.filename for f in features if f.fid == "F01"], [real.filename])
+        self.assertTrue(any("F01-0-notes.md" in w for w in warnings), warnings)
+        code, out, _ = run("check", "-d", str(self.ctx))
+        self.assertEqual(code, 1)
+        self.assertIn("F01-0-notes.md", out)
+
     def test_check_never_writes(self):
         before = (self.ctx / "backlog.md").read_bytes()
         run("check", "-d", str(self.ctx))
