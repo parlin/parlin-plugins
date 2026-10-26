@@ -881,7 +881,7 @@ class FeatureTable(DataTable):
 # ── Main app ───────────────────────────────────────────────────────────
 
 class BacklogApp(App):
-    # Pane width ratios: (left%, right%) — cycled with [ and ]
+    # Pane width ratios: (left%, right%) — cycled with Shift+← and Shift+→
     PANE_RATIOS = [(20, 80), (30, 70), (40, 60), (50, 50), (60, 40), (70, 30)]
     DEFAULT_RATIO_IDX = 2  # 40:60
     LIST_FOCUS_RATIO_IDX = 5  # 70:30 — toggled with z, for reading long titles
@@ -942,8 +942,8 @@ class BacklogApp(App):
         Binding("ctrl+s", "save", "Save", priority=True, show=False),
         Binding("ctrl+r", "restart", "Restart", priority=True),
         Binding("q", "quit_app", "Quit"),
-        Binding("[", "pane_ratio_left", "List ◀"),
-        Binding("]", "pane_ratio_right", "List ▶"),
+        Binding("shift+left", "pane_ratio_left", "List ◀", key_display="⇧←"),
+        Binding("shift+right", "pane_ratio_right", "List ▶", key_display="⇧→"),
         Binding("z", "toggle_list_focus", "Wide list"),
         Binding("escape", "stop_edit", "Back to list", show=False),
         Binding("tab", "focus_next", "Tab focus", show=False),
@@ -1028,7 +1028,7 @@ class BacklogApp(App):
                 yield FeatureTable(id="feature-table")
             yield DetailPane(id="detail-pane")
         yield Static("", id="update-bar")
-        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  f filter col  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  i impl  │  s save  │  \\[/] resize  z wide list", id="status-bar")
+        yield Static("←/→ columns  │  ↑/↓ rows  │  Enter pick value  │  f filter col  │  Shift+↑/↓ reorder  │  e edit  p plan  x research  │  c claude  i impl  │  s save  │  Shift+←/→ resize  z wide list", id="status-bar")
         yield Footer()
 
     def on_mount(self):
@@ -2223,7 +2223,7 @@ class BacklogApp(App):
         left, right = self.PANE_RATIOS[self._ratio_idx]
         pane = self.query_one("#left-pane", Vertical)
         pane.styles.width = f"{left}%"
-        self._set_status(f"Pane ratio {left}:{right}  —  \\[[]  \\[]] to adjust, \\[z] wide list")
+        self._set_status(f"Pane ratio {left}:{right}  —  Shift+←/→ to adjust, \\[z] wide list")
 
     def action_pane_ratio_left(self):
         if self.editing:

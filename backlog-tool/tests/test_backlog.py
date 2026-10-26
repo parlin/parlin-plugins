@@ -718,7 +718,7 @@ class TuiActuallyRuns(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("z")                     # and back
                 await pilot.pause()
                 self.assertEqual(name_width(), start)
-                await pilot.press("[", "[", "[")           # past the narrowest step
+                await pilot.press("shift+left", "shift+left", "shift+left")           # past the narrowest step
                 await pilot.pause()
                 self.assertGreaterEqual(name_width(), FEATURE_COL_MIN, "the Feature column has a floor")
 
