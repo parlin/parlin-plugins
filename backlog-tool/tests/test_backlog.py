@@ -357,6 +357,20 @@ class CheckCommand(BacklogTestCase):
         self.assertEqual(code, 1)
         self.assertIn("no row in backlog.md", out)
 
+    def test_a_second_file_with_the_same_id_is_reported_not_loaded(self):
+        """A companion doc such as F01-0-notes.md must not become a second F01: two
+        features with one ID crashed the TUI with DuplicateKey (camthis F235, 2026-10-26).
+        The file the table row names wins, even though the companion sorts first."""
+        real = next(f for f in model.load_features(self.ctx, with_bodies=False) if f.fid == "F01")
+        self.write_feature("F01-0-notes.md", "# F01: Notes about F01\n\nfree text\n")
+        warnings = []
+        features = model.load_features(self.ctx, with_bodies=False, warn=warnings.append)
+        self.assertEqual([f.filename for f in features if f.fid == "F01"], [real.filename])
+        self.assertTrue(any("F01-0-notes.md" in w for w in warnings), warnings)
+        code, out, _ = run("check", "-d", str(self.ctx))
+        self.assertEqual(code, 1)
+        self.assertIn("F01-0-notes.md", out)
+
     def test_check_never_writes(self):
         before = (self.ctx / "backlog.md").read_bytes()
         run("check", "-d", str(self.ctx))
@@ -681,6 +695,32 @@ class TuiActuallyRuns(unittest.IsolatedAsyncioTestCase):
                              if c.label.plain.startswith("Theme"))
                 self.assertGreater(width, len("sync & conflicts"),
                                    "a theme must not be truncated in its own column")
+
+    async def test_feature_column_grows_with_the_list_pane(self):
+        with TemporaryDirectory() as tmp:
+            ctx = Path(tmp) / "context"
+            run("--init", str(ctx))
+            from backlog_tool.tui import BacklogApp, FEATURE_COL_MIN
+            app = BacklogApp(ctx)
+            async with app.run_test(size=(200, 40)) as pilot:
+                await pilot.pause()
+                table = app.query_one("#feature-table")
+                name_width = lambda: next(c.width for k, c in table.columns.items()
+                                          if k.value == "name")
+                used = lambda: sum(c.get_render_width(table) for c in table.columns.values())
+                start = name_width()
+                self.assertLessEqual(used(), table.size.width,
+                                     "the columns must fit the pane without sideways scroll")
+                await pilot.press("z")                     # wide list
+                await pilot.pause()
+                self.assertGreater(name_width(), start, "a wider pane must show more title")
+                self.assertLessEqual(used(), table.size.width)
+                await pilot.press("z")                     # and back
+                await pilot.pause()
+                self.assertEqual(name_width(), start)
+                await pilot.press("shift+left", "shift+left", "shift+left")           # past the narrowest step
+                await pilot.pause()
+                self.assertGreaterEqual(name_width(), FEATURE_COL_MIN, "the Feature column has a floor")
 
     async def test_theme_filter_hides_the_unthemed(self):
         with TemporaryDirectory() as tmp:

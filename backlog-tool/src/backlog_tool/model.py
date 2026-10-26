@@ -306,7 +306,8 @@ def parse_table_row(line: str) -> dict | None:
             theme, timing, status = "", parts[2].lower(), parts[3].lower()
         name = parts[1]
     return {"fid": parts[0].upper(), "name": name,
-            "theme": theme, "timing": timing, "status": status}
+            "theme": theme, "timing": timing, "status": status,
+            "file": parts[-1].strip("` ")}
 
 
 def apply_backlog_order(context_dir: Path, features: list[Feature]):
@@ -372,10 +373,40 @@ def load_features(context_dir: Path, with_bodies: bool = True,
             except Exception as e:
                 if warn:
                     warn(f"Warning: could not parse {f.name}: {e}")
+    features = _one_file_per_fid(context_dir, features, warn)
     detect_associated_files(context_dir, features, with_bodies=with_bodies)
     apply_backlog_order(context_dir, features)
     sort_features(features)
     return features
+
+
+def _one_file_per_fid(context_dir: Path, features: list[Feature], warn) -> list[Feature]:
+    """Keep one feature per FID. A companion doc named like a feature (say
+    F235-sync-solution-options.md next to F235-moment-...md) would otherwise load as
+    a second F235, and two rows with one key crash the TUI. The file the table row
+    names wins; failing that, the first by name. The others are reported, not loaded.
+    """
+    by_fid: dict[str, list[Feature]] = {}
+    for f in features:
+        by_fid.setdefault(f.fid.upper(), []).append(f)
+    if all(len(group) == 1 for group in by_fid.values()):
+        return features
+    named = {}
+    backlog_path = context_dir / "backlog.md"
+    if backlog_path.exists():
+        for line in backlog_path.read_text(encoding="utf-8").split("\n"):
+            row = parse_table_row(line)
+            if row is not None:
+                named.setdefault(row["fid"], row["file"])
+    kept = []
+    for fid, group in by_fid.items():
+        keep = next((f for f in group if f.filename == named.get(fid)), group[0])
+        kept.append(keep)
+        for other in group:
+            if other is not keep and warn:
+                warn(f"{fid}: {other.filename} reuses the ID of {keep.filename} and is not "
+                     f"loaded; rename it, e.g. to a -plan.md or -research.md companion")
+    return kept
 
 
 def next_fid(features: list[Feature]) -> str:

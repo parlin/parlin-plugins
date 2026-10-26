@@ -135,7 +135,8 @@ It deliberately uses plain markdown in a conventional file layout: tasks and pla
 | s | Save all changes |
 | r | Reload from disk |
 | Ctrl+R | Restart process |
-| [ / ] | Resize pane ratio |
+| Shift+← / Shift+→ | Narrow / widen the list pane; the Feature column grows with it |
+| z | Toggle a wide list (70:30) for reading long titles, and back |
 | q | Quit |
 
 ### Claude pane

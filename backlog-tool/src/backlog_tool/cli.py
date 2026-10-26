@@ -249,9 +249,9 @@ def cmd_check(args) -> int:
     """Report drift between the table and the feature files. Never fixes it."""
     from .model import read_backlog_rows
     context_dir = _context_dir(args.dir)
-    features = load_features(context_dir, with_bodies=False)
-    table = read_backlog_rows(context_dir)
     problems = []
+    features = load_features(context_dir, with_bodies=False, warn=problems.append)
+    table = read_backlog_rows(context_dir)
     by_fid = {f.fid.upper(): f for f in features}
     for fid in table:
         if fid not in by_fid:
